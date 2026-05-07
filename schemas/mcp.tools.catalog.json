@@ -1,0 +1,71 @@
+[
+  {
+    "name": "browser_agent_run",
+    "description": "Run a general Browser Use task through the HTTP JSON endpoint. Use this for arbitrary browser automation when no Feishu-specific flow applies.",
+    "inputSchemaFile": "./mcp.browser_agent_run.input.schema.json",
+    "http": {
+      "method": "POST",
+      "path": "/v1/agent/run",
+      "bodyTemplate": {
+        "mode": "general",
+        "query": "{{query}}",
+        "start_url": "{{start_url}}",
+        "allowed_domains": "{{allowed_domains}}",
+        "headless": "{{headless}}",
+        "max_steps": "{{max_steps}}",
+        "timeout_sec": "{{timeout_sec}}",
+        "use_vision": "{{use_vision}}",
+        "llm": "{{llm}}",
+        "auth": "{{auth}}"
+      }
+    }
+  },
+  {
+    "name": "feishu_bitable_draft_form",
+    "description": "Phase 1 of the Feishu bitable -> questionnaire flow. Opens the bitable, switches into the built-in questionnaire/form editor, captures the visible draft questions, and stops for human review. Does NOT enable form sharing and does NOT return a final questionnaire URL. Pass the user's full natural-language request including the bitable URL inside `query`; the server auto-extracts the URL. The response carries `draft_session_id` and `draft_session_expires_at`; pass `draft_session_id` back into `feishu_bitable_publish_form` once a human has approved the draft.",
+    "inputSchemaFile": "./mcp.feishu_bitable_draft_form.input.schema.json",
+    "http": {
+      "method": "POST",
+      "path": "/v1/agent/run",
+      "bodyTemplate": {
+        "mode": "feishu_bitable_to_form",
+        "query": "{{query}}",
+        "bitable_url": "{{bitable_url}}",
+        "allowed_domains": "{{allowed_domains}}",
+        "headless": "{{headless}}",
+        "max_steps": "{{max_steps}}",
+        "timeout_sec": "{{timeout_sec}}",
+        "use_vision": "{{use_vision}}",
+        "llm": "{{llm}}",
+        "auth": "{{auth}}",
+        "require_human_confirmation": true,
+        "human_confirmation_granted": false
+      }
+    }
+  },
+  {
+    "name": "feishu_bitable_publish_form",
+    "description": "Phase 2 of the Feishu bitable -> questionnaire flow. Only call this AFTER `feishu_bitable_draft_form` has returned a draft and a human has approved it. Pass the `draft_session_id` from phase 1's response back via this tool's `draft_session_id` input. The server validates that the session is unexpired and that bitable_url + auth profile match the draft phase, then re-opens the bitable, applies any `human_confirmation_notes`, opens 分享表单 / 开启表单分享, and returns the real shareable questionnaire URL in `form_url`.",
+    "inputSchemaFile": "./mcp.feishu_bitable_publish_form.input.schema.json",
+    "http": {
+      "method": "POST",
+      "path": "/v1/agent/run",
+      "bodyTemplate": {
+        "mode": "feishu_bitable_to_form",
+        "query": "{{query}}",
+        "bitable_url": "{{bitable_url}}",
+        "draft_session_id": "{{draft_session_id}}",
+        "human_confirmation_notes": "{{human_confirmation_notes}}",
+        "allowed_domains": "{{allowed_domains}}",
+        "headless": "{{headless}}",
+        "max_steps": "{{max_steps}}",
+        "timeout_sec": "{{timeout_sec}}",
+        "use_vision": "{{use_vision}}",
+        "llm": "{{llm}}",
+        "auth": "{{auth}}",
+        "require_human_confirmation": true,
+        "human_confirmation_granted": true
+      }
+    }
+  }
+]

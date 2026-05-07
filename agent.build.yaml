@@ -1,0 +1,28 @@
+version: 1
+
+build:
+  dockerfile: ./Dockerfile
+  context: .
+  platform: linux/amd64
+
+runtime:
+  start_mode: service
+  probe:
+    protocol: http
+    port: 49983
+    path: /health
+    startup_timeout_sec: 120
+  healthcheck:
+    protocol: http
+    path: /health
+    expected_status: 204
+  expose_ports:
+    - 49983
+    - 49999
+  writable_layer_size: 2G
+
+metadata:
+  name: browser-use-cubesandbox-agent
+  language: python
+  description: "Browser Use based HTTP agent with JSON and SSE APIs, Feishu bitable to questionnaire showcase, and CubeSandbox-compatible envd integration."
+

@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "browser-use-cubesandbox-agent"
+version = "0.1.0"
+description = "CubeSandbox-compatible Browser Use agent with HTTP, SSE, and Feishu bitable-to-form showcase."
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "browser-use>=0.12.6,<0.13.0",
+  "fastapi>=0.115,<1.0",
+  "playwright>=1.55,<1.56",
+  "pydantic>=2.10,<3.0",
+  "python-dotenv>=1.0,<2.0",
+  "uvicorn[standard]>=0.34,<1.0",
+]
+
+[tool.setuptools]
+packages = ["app"]

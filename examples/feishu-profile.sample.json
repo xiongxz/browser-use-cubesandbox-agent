@@ -1,0 +1,10 @@
+{
+  "profile_id": "feishu-default",
+  "set_as_feishu_default": true,
+  "description": "replace this file with a real Playwright storage_state JSON payload",
+  "storage_state": {
+    "cookies": [],
+    "origins": []
+  }
+}
+

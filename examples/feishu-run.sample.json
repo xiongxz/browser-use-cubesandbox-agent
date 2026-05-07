@@ -1,0 +1,8 @@
+{
+  "query": "请把这个飞书多维表格转成问卷：https://lexmount.feishu.cn/wiki/DrETwmLEmiHUZ9kDkAsctla5nkK",
+  "auth": {
+    "profile_id": "feishu-default"
+  },
+  "timeout_sec": 900,
+  "max_steps": 35
+}

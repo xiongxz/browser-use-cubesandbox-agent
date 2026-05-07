@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "feishu_bitable_publish_form",
+  "description": "Input for phase 2 (publish/share) of converting a Feishu bitable into a questionnaire. Only call this AFTER a human has reviewed the draft questions returned by feishu_bitable_draft_form. The draft_session_id from phase 1's response is required and must match the same bitable_url and auth profile.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["query", "draft_session_id"],
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "Natural-language instruction. Should contain the same Feishu bitable URL used in phase 1.",
+      "examples": [
+        "请把这个飞书多维表格转成问卷：https://lexmount.feishu.cn/wiki/DrETwmLEmiHUZ9kDkAsctla5nkK"
+      ]
+    },
+    "draft_session_id": {
+      "type": "string",
+      "description": "Token returned by feishu_bitable_draft_form's response (`draft_session_id`). Single-use; expires after DRAFT_SESSION_TTL_SEC (default 1800s). The server rejects mismatched bitable_url or auth profile."
+    },
+    "bitable_url": {
+      "type": "string",
+      "description": "Optional explicit Feishu bitable URL. When omitted, the server extracts it from `query`. Must match the URL used in the draft phase."
+    },
+    "human_confirmation_notes": {
+      "type": "string",
+      "description": "Optional human review feedback. The agent will apply these edit instructions before opening 分享表单 / 开启表单分享."
+    },
+    "allowed_domains": {
+      "type": "array",
+      "default": ["*.feishu.cn", "*.larksuite.com", "*.larkoffice.com"],
+      "items": {
+        "type": "string"
+      }
+    },
+    "headless": {
+      "type": "boolean",
+      "description": "Whether to run the browser in headless mode."
+    },
+    "max_steps": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 120,
+      "default": 35
+    },
+    "timeout_sec": {
+      "type": "integer",
+      "minimum": 30,
+      "maximum": 3600,
+      "default": 900
+    },
+    "use_vision": {
+      "type": "string",
+      "enum": ["auto", "always", "never"],
+      "default": "auto"
+    },
+    "llm": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "base_url": { "type": "string" },
+        "api_key": { "type": "string" },
+        "model": { "type": "string" },
+        "temperature": { "type": "number", "minimum": 0, "maximum": 2 }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "profile_id": {
+          "type": "string",
+          "description": "Server-side stored auth profile id. If omitted, the service falls back to FEISHU_DEFAULT_PROFILE_ID."
+        },
+        "storage_state": {
+          "type": "object",
+          "description": "Playwright storage state JSON object for an already logged-in Feishu session."
+        },
+        "storage_state_path": {
+          "type": "string",
+          "description": "Path to an existing Feishu storage state file inside the container."
+        },
+        "sensitive_data": {
+          "type": "object",
+          "description": "Optional Browser Use sensitive_data payload for login assistance."
+        }
+      }
+    }
+  }
+}
