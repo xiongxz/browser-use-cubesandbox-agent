@@ -29,11 +29,18 @@ logger = logging.getLogger(__name__)
 
 _MCP_INSTRUCTIONS = (
     "This server wraps a Browser Use agent that drives a real Chromium browser. "
-    "Use `browser_agent_run` for arbitrary browser automation. For the Feishu "
-    "bitable -> questionnaire showcase, call `feishu_bitable_draft_form` first, "
-    "wait for human review of the returned draft_questions, then call "
-    "`feishu_bitable_publish_form` with the draft_session_id from the first "
-    "response."
+    "Use `browser_agent_run` for arbitrary browser automation. "
+    "\n\n"
+    "For the Feishu bitable -> questionnaire flow, there are TWO phases:\n"
+    "1. Call `feishu_bitable_draft_form` FIRST - it opens the bitable, creates/opens "
+    "the form editor, captures draft questions, and stops for human review. "
+    "The response includes `draft_session_id` and `draft_session_expires_at`.\n"
+    "2. AFTER a human reviews and approves, call `feishu_bitable_publish_form` with "
+    "the `draft_session_id` from phase 1. The agent will find the existing form view, "
+    "click 'Share Form', enable sharing, and return the final questionnaire URL.\n"
+    "\n"
+    "IMPORTANT: `draft_session_id` is REQUIRED for phase 2 and must match exactly. "
+    "Do NOT call phase 2 before phase 1 completes successfully."
 )
 
 
@@ -166,12 +173,14 @@ def build_server(*, streamable_http_path: str | None = None) -> FastMCP:
     @server.tool(
         name="feishu_bitable_publish_form",
         description=(
-            "Phase 2 of the Feishu bitable -> questionnaire flow. Only call "
-            "AFTER `feishu_bitable_draft_form` has returned a draft and a human "
-            "has approved it. Pass the `draft_session_id` from phase 1's "
-            "response. The server validates the session, applies any "
-            "`human_confirmation_notes`, opens 分享表单 / 开启表单分享, and "
-            "returns the real shareable questionnaire URL in `form_url`."
+            "Phase 2 of the Feishu bitable -> questionnaire flow. ONLY call AFTER: "
+            "(1) feishu_bitable_draft_form returned a draft, AND (2) a human has approved it. "
+            "You MUST pass the exact draft_session_id from phase 1's response. "
+            "The agent will: check if a form view exists (create it if needed by clicking 'Generate Form/生成表单'), "
+            "enter the form editor, apply any human_confirmation_notes edits, "
+            "click the 'Share Form/分享表单' button in the top-right, "
+            "enable the 'Enable form sharing/开启表单分享' switch, "
+            "wait ~2 seconds for the link to appear, and return the final shareable questionnaire URL in form_url."
         ),
     )
     async def feishu_bitable_publish_form(

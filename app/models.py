@@ -73,9 +73,9 @@ class BrowserAgentRunRequest(BaseModel):
         default="",
         description="Natural language instruction for the browser agent.",
     )
-    mode: Literal["general", "feishu_bitable_to_form"] = Field(
-        default="general",
-        description="Execution mode. Use feishu_bitable_to_form for the dedicated showcase.",
+    mode: Literal["general", "feishu_bitable_to_form"] | None = Field(
+        default=None,
+        description="Execution mode. Use feishu_bitable_to_form for the dedicated showcase. Auto-detected when omitted and query contains a Feishu URL.",
     )
     start_url: str | None = Field(default=None, description="Optional start URL for the first navigation step.")
     bitable_url: str | None = Field(
@@ -112,12 +112,15 @@ class BrowserAgentRunRequest(BaseModel):
     @model_validator(mode="after")
     def validate_mode(self) -> "BrowserAgentRunRequest":
         # 1. Auto-promote to feishu mode when query/bitable_url contains a Feishu URL
-        if self.mode == "general":
+        # Only auto-detect when mode is not explicitly set
+        if self.mode is None:
             extracted = extract_feishu_url(self.query) or extract_feishu_url(self.bitable_url or "")
             if extracted:
                 self.mode = "feishu_bitable_to_form"
                 if not self.bitable_url:
                     self.bitable_url = extracted
+            else:
+                self.mode = "general"
 
         # 2. HITL fields are only meaningful in feishu mode
         hitl_explicit = (

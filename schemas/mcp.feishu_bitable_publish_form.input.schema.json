@@ -1,29 +1,31 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "feishu_bitable_publish_form",
-  "description": "Input for phase 2 (publish/share) of converting a Feishu bitable into a questionnaire. Only call this AFTER a human has reviewed the draft questions returned by feishu_bitable_draft_form. The draft_session_id from phase 1's response is required and must match the same bitable_url and auth profile.",
+  "description": "Phase 2 (publish/share) of converting a Feishu bitable into a questionnaire. ONLY call this AFTER: (1) feishu_bitable_draft_form returned a draft, AND (2) a human has approved it. You MUST pass the exact draft_session_id from phase 1's response. The agent will find the existing form view (NOT create a new one), click the 'Share Form' button in the top-right corner, enable form sharing, wait ~2 seconds for the link to appear, and return the final shareable questionnaire URL.",
   "type": "object",
   "additionalProperties": false,
   "required": ["query", "draft_session_id"],
   "properties": {
     "query": {
       "type": "string",
-      "description": "Natural-language instruction. Should contain the same Feishu bitable URL used in phase 1.",
+      "description": "Natural-language instruction. MUST contain the SAME Feishu bitable URL that was used in phase 1. This is required for the agent to navigate to the correct workspace.",
       "examples": [
         "请把这个飞书多维表格转成问卷：https://lexmount.feishu.cn/wiki/DrETwmLEmiHUZ9kDkAsctla5nkK"
       ]
     },
     "draft_session_id": {
       "type": "string",
-      "description": "Token returned by feishu_bitable_draft_form's response (`draft_session_id`). Single-use; expires after DRAFT_SESSION_TTL_SEC (default 1800s). The server rejects mismatched bitable_url or auth profile."
-    },
-    "bitable_url": {
-      "type": "string",
-      "description": "Optional explicit Feishu bitable URL. When omitted, the server extracts it from `query`. Must match the URL used in the draft phase."
+      "description": "REQUIRED. The exact draft_session_id value returned by feishu_bitable_draft_form's response. This is a single-use token that expires after DRAFT_SESSION_TTL_SEC (default 1800s). The server will reject the request if the draft_session_id does not match the bitable_url or auth profile from phase 1.",
+      "examples": [
+        "8da6a3c7-a79f-41c3-b381-885310a6db8c"
+      ]
     },
     "human_confirmation_notes": {
       "type": "string",
-      "description": "Optional human review feedback. The agent will apply these edit instructions before opening 分享表单 / 开启表单分享."
+      "description": "Optional human review feedback or edit instructions. The agent will apply these edits BEFORE opening the share dialog. Example: '题目内容已经确认，请点击右上角分享表单，开启表单分享，并返回最终真实问卷链接。'",
+      "examples": [
+        "题目内容已经确认，请点击右上角分享表单，开启表单分享，并返回最终真实问卷链接。"
+      ]
     },
     "allowed_domains": {
       "type": "array",

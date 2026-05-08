@@ -21,6 +21,7 @@ RUN apt-get update \
 
 COPY pyproject.toml README.md /app/
 COPY app /app/app
+COPY mcp_server /app/mcp_server
 COPY schemas /app/schemas
 COPY .env.example /app/.env.example
 COPY agent.build.yaml /app/agent.build.yaml
@@ -33,4 +34,3 @@ EXPOSE 49983 49998 49999
 
 ENTRYPOINT ["/usr/local/bin/cube-entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "49999"]
-

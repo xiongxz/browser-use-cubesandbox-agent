@@ -42,6 +42,10 @@ browser-use-cubesandbox-agent/
 │   ├── prompts.py
 │   ├── service.py
 │   └── sse.py
+├── mcp_server
+│   ├── __init__.py
+│   ├── client_example.py
+│   └── server.py
 ├── pyproject.toml
 └── schemas
     ├── mcp.browser_agent_run.input.schema.json

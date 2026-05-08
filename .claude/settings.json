@@ -11,7 +11,10 @@
       "Bash(/opt/homebrew/bin/git check-ignore *)",
       "Bash(whence git *)",
       "Bash(python3 -c ' *)",
-      "Bash(/bin/bash -c 'cd \"/Users/bruinxz/Documents/New project/browser-use-cubesandbox-agent\" && git add -A && git status')"
+      "Bash(/bin/bash -c 'cd \"/Users/bruinxz/Documents/New project/browser-use-cubesandbox-agent\" && git add -A && git status')",
+      "Bash(/bin/bash -c 'cd \"/Users/bruinxz/Documents/New project/browser-use-cubesandbox-agent\" && git log --oneline -3')",
+      "Bash(/bin/bash -c 'cd \"/Users/bruinxz/Documents/New project/browser-use-cubesandbox-agent\" && git diff --cached --stat')",
+      "Bash(/bin/bash -c *)"
     ]
   }
 }
