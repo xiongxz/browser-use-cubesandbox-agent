@@ -1,0 +1,15 @@
+{
+  "tool": "feishu_bitable_publish_form",
+  "title": "Phase 2: publish the form after human approval",
+  "notes": "Pre-requisite: feishu_bitable_draft_form returned a draft_session_id. Either edit this file in place or use --set draft_session_id=<id> on the CLI.",
+  "arguments": {
+    "query": "请把这个飞书多维表格转成问卷：https://lexmount.feishu.cn/wiki/DrETwmLEmiHUZ9kDkAsctla5nkK",
+    "draft_session_id": "REPLACE_WITH_draft_session_id_FROM_PHASE_1",
+    "human_confirmation_notes": "题目内容已经确认，请点击右上角分享表单，开启表单分享，并返回最终真实问卷链接。",
+    "auth": {
+      "profile_id": "feishu-default"
+    },
+    "max_steps": 35,
+    "timeout_sec": 900
+  }
+}

@@ -1,7 +1,7 @@
 {
   "query": "请把这个飞书多维表格转成问卷：https://lexmount.feishu.cn/wiki/DrETwmLEmiHUZ9kDkAsctla5nkK",
   "human_confirmation_granted": true,
-  "draft_session_id": "c18ecbc2-f8ea-4afd-9a33-4ee3ca4f739c",
+  "draft_session_id": "73b8060b-bfc2-490e-91a1-666925529ec0",
   "human_confirmation_notes": "题目内容已经确认，请点击右上角分享表单，开启表单分享，并返回最终真实问卷链接。",
   "auth": {
     "profile_id": "feishu-default"

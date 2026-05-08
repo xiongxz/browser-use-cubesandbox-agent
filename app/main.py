@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import urllib.error
 import urllib.request
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
@@ -40,6 +42,46 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def _mcp_enabled() -> bool:
+    return os.getenv("ENABLE_MCP", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _mcp_port() -> int:
+    return int(os.getenv("MCP_PORT", "49998"))
+
+
+def _start_mcp_thread() -> None:
+    import threading
+
+    def runner() -> None:
+        import asyncio
+
+        from mcp_server.server import build_server
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        server = build_server()
+        logger.info(
+            "MCP server thread starting on http://%s:%s%s",
+            server.settings.host,
+            server.settings.port,
+            server.settings.streamable_http_path,
+        )
+        try:
+            loop.run_until_complete(server.run_streamable_http_async())
+        except Exception:
+            logger.exception("MCP server thread crashed")
+
+    threading.Thread(target=runner, daemon=True, name="mcp-server").start()
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    if _mcp_enabled():
+        _start_mcp_thread()
+    yield
+
+
 app = FastAPI(
     title="Browser Use CubeSandbox Agent",
     version="0.1.0",
@@ -48,6 +90,7 @@ app = FastAPI(
         "Supports runtime config injection via /v1/init when env vars cannot be "
         "passed at sandbox creation time."
     ),
+    lifespan=_lifespan,
 )
 
 
@@ -110,24 +153,27 @@ async def _llm_auth_probe(base_url: str | None, api_key: str | None) -> dict[str
 @app.get("/")
 async def root() -> JSONResponse:
     s = runtime_config.settings
+    endpoints = [
+        "GET /healthz",
+        "GET /healthz?probe=auth",
+        "POST /v1/init",
+        "GET /v1/auth/storage-state",
+        "POST /v1/auth/storage-state",
+        "GET /v1/auth/storage-state/{profile_id}",
+        "POST /v1/agent/run",
+        "POST /v1/agent/stream",
+    ]
+    ports: dict[str, Any] = {"envd": 49983, "app": s.port}
+    if _mcp_enabled():
+        ports["mcp"] = _mcp_port()
+        endpoints.append(f"POST http://<host>:{_mcp_port()}/mcp (Model Context Protocol streamable HTTP, separate port)")
     return JSONResponse(
         {
             "name": "browser-use-cubesandbox-agent",
             "version": "0.1.0",
-            "ports": {
-                "envd": 49983,
-                "app": s.port,
-            },
-            "endpoints": [
-                "GET /healthz",
-                "GET /healthz?probe=auth",
-                "POST /v1/init",
-                "GET /v1/auth/storage-state",
-                "POST /v1/auth/storage-state",
-                "GET /v1/auth/storage-state/{profile_id}",
-                "POST /v1/agent/run",
-                "POST /v1/agent/stream",
-            ],
+            "ports": ports,
+            "mcp_enabled": _mcp_enabled(),
+            "endpoints": endpoints,
         }
     )
 

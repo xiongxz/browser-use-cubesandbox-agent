@@ -1,0 +1,13 @@
+{
+  "tool": "feishu_bitable_draft_form",
+  "title": "Phase 1: extract draft questions from a Feishu bitable",
+  "notes": "Requires a saved Feishu auth profile (see scripts/upload_feishu_storage_state.py). Server auto-detects the bitable URL from `query`.",
+  "arguments": {
+    "query": "请把这个飞书多维表格转成问卷：https://lexmount.feishu.cn/wiki/DrETwmLEmiHUZ9kDkAsctla5nkK",
+    "auth": {
+      "profile_id": "feishu-default"
+    },
+    "max_steps": 35,
+    "timeout_sec": 900
+  }
+}

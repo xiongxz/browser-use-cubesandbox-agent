@@ -29,7 +29,7 @@ RUN pip install --no-cache-dir . \
     && python -m playwright install --with-deps chromium \
     && rm -rf /root/.cache/pip
 
-EXPOSE 49983 49999
+EXPOSE 49983 49998 49999
 
 ENTRYPOINT ["/usr/local/bin/cube-entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "49999"]

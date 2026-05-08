@@ -439,6 +439,7 @@ docker push your-registry.example.com/browser-use-cubesandbox-agent:latest
 
 - `49983` 是 `envd` 控制面端口，不要给业务服务占用。
 - 业务 HTTP 服务监听 `49999`。
+- `ENABLE_MCP=true` 时还会在 `49998` 起一个 MCP streamable-HTTP server（详见 §9）。即便不启用 MCP，把 49998 一起 expose 也无副作用。
 - 模板探针应使用 `49983/health`，这是 CubeSandbox 官方文档要求的 `envd` 探针。
 
 ```bash
@@ -446,6 +447,7 @@ cubemastercli tpl create-from-image \
   --image your-registry.example.com/browser-use-cubesandbox-agent:latest \
   --writable-layer-size 2G \
   --expose-port 49983 \
+  --expose-port 49998 \
   --expose-port 49999 \
   --probe 49983 \
   --probe-path /health
@@ -505,15 +507,137 @@ feishu_bitable_draft_form(query)
 4. 把 HTTP JSON 返回原样作为 tool result，或裁掉 `screenshots`、`history_excerpt` 这类大字段。
 5. tool description 中已经写明调用顺序约束（"Only call after ... has returned a draft"），让上游 LLM 不会乱序触发。
 
-## 9. 已知边界
+## 9. 内置 MCP Server
+
+`schemas/` 是给"自己接 MCP server"的人用的契约文件；如果你**不想自己写 MCP server**，仓库还自带了一个，跟 FastAPI 同进程跑：
+
+### 启用方式
+
+```bash
+ENABLE_MCP=true ./scripts/run_local.sh
+# 或
+ENABLE_MCP=true uvicorn app.main:app --host 0.0.0.0 --port 49999
+```
+
+启用后 FastAPI 会**额外起一个线程**跑 MCP server，默认监听 `0.0.0.0:49998/mcp`（与业务 HTTP 49999 分开）。`GET /` 自检接口会回显 `"mcp_enabled": true` 和 `ports.mcp` 端口号。
+
+CubeSandbox 模板要把 49998 一起 expose（[Dockerfile](Dockerfile) / [agent.build.yaml](agent.build.yaml) 已经配好）：
+
+```bash
+cubemastercli tpl create-from-image \
+  --image your-registry.example.com/browser-use-cubesandbox-agent:latest \
+  --writable-layer-size 2G \
+  --expose-port 49983 \
+  --expose-port 49998 \
+  --expose-port 49999 \
+  --probe 49983 --probe-path /health
+```
+
+放到 sandbox 里之后 MCP 的公网 URL 是 `https://49998-<sandbox_id>.cube.app/mcp`。
+
+工具集合与 [`schemas/mcp.tools.catalog.json`](schemas/mcp.tools.catalog.json) 一致：`browser_agent_run` / `feishu_bitable_draft_form` / `feishu_bitable_publish_form`，3 个工具内部都通过 `httpx` 转回 `POST /v1/agent/run`，所以业务行为、HITL、`draft_session_id` 校验都跟直连 HTTP 一模一样。
+
+### 单独启动（不挂 FastAPI）
+
+支持把 MCP server 拆成单进程跑，比如给 Claude Desktop / IDE 用 stdio：
+
+```bash
+# stdio（默认），给 IDE / desktop client 配置用
+./.venv/bin/python -m mcp_server.server
+
+# Streamable HTTP，独占端口
+MCP_HOST=0.0.0.0 MCP_PORT=49998 \
+./.venv/bin/python -m mcp_server.server --transport streamable-http
+```
+
+单独启动的版本仍然把工具调用反代到 FastAPI；如果 FastAPI 在另一台机器，需要设 `MCP_PROXY_BASE=http://<host>:49999`。
+
+### 客户端验证
+
+`mcp_server/client_example.py` 是一个最小的 streamable-HTTP 客户端，三种用法逐级递进：
+
+**1. 仅 list_tools（最快，几秒返回，不动浏览器、不烧 LLM token）**
+
+```bash
+ENABLE_MCP=true ./scripts/run_local.sh &
+./.venv/bin/python -m mcp_server.client_example
+# 期望:
+#   PASS MCP session initialized (server=browser-use-cubesandbox-agent ...)
+#   PASS all 3 expected tools registered
+```
+
+**2. 用 case 文件触发真实 tool 调用**
+
+`examples/mcp/` 下放好了 4 个 case JSON，全部走"`tool` + `title` + `arguments`" 的格式（**注意它跟 `examples/feishu-run.sample.json` 那种 HTTP body 是不同形态**——后者是给 `POST /v1/agent/run` 用的，前者只是 MCP 工具入参）：
+
+| 文件 | 工具 | 用途 |
+|---|---|---|
+| `browser_agent_run.example_com.json` | `browser_agent_run` | 最便宜的端到端冒烟，只要 LLM 凭据 |
+| `browser_agent_run.github_stars.json` | `browser_agent_run` | 稍重一点，验证读取 GitHub 结构化数据 |
+| `feishu_bitable_draft_form.json` | `feishu_bitable_draft_form` | Feishu 转问卷 phase 1（要登录态 profile） |
+| `feishu_bitable_publish_form.json` | `feishu_bitable_publish_form` | Feishu 转问卷 phase 2，含 `draft_session_id` 占位符 |
+
+```bash
+# 单 case
+./.venv/bin/python -m mcp_server.client_example \
+  --case examples/mcp/browser_agent_run.example_com.json
+
+# 多 case 顺序执行
+./.venv/bin/python -m mcp_server.client_example \
+  --case examples/mcp/browser_agent_run.example_com.json \
+  --case examples/mcp/browser_agent_run.github_stars.json
+```
+
+**3. 用 `--set` 在命令行覆写 case 字段**
+
+phase 2 case 的 `draft_session_id` 是 `REPLACE_WITH_...` 占位符；客户端检测到没填会**直接报错并提示你怎么改**。三种填法任选：
+
+```bash
+# 推荐：phase 1 跑完后直接抄返回的 draft_session_id 命令行覆写
+./.venv/bin/python -m mcp_server.client_example \
+  --case examples/mcp/feishu_bitable_publish_form.json \
+  --set draft_session_id=c18ecbc2-f8ea-4afd-9a33-4ee3ca4f739c
+
+# 嵌套结构也能覆写（VALUE 优先按 JSON 解析）
+./.venv/bin/python -m mcp_server.client_example \
+  --case examples/mcp/feishu_bitable_draft_form.json \
+  --set 'auth={"profile_id":"feishu-alt"}' \
+  --set max_steps=20
+
+# 或者就改 examples/mcp/feishu_bitable_publish_form.json 里的占位符再跑
+```
+
+phase 1 case 跑通后，客户端会**直接打印一行可复制粘贴的 phase 2 命令**，含真实 `draft_session_id`，省掉来回抄写：
+
+```
+PASS feishu_bitable_draft_form: phase 1 returned a draft for human review
+     draft_session_id: c18ecbc2-f8ea-4afd-9a33-4ee3ca4f739c
+     expires_at:       1715077200.0
+       Q1: 你的姓名 [text, required]
+       Q2: 反馈内容 [textarea, optional]
+       ...
+
+     Next step (phase 2): --case examples/mcp/feishu_bitable_publish_form.json --set draft_session_id=c18ecbc2-f8ea-4afd-9a33-4ee3ca4f739c
+```
+
+**指定别的 MCP URL（分离部署 / sandbox 公网）**
+
+```bash
+MCP_URL=https://49998-<sandbox_id>.cube.app/mcp \
+  ./.venv/bin/python -m mcp_server.client_example \
+  --case examples/mcp/browser_agent_run.example_com.json
+```
+
+## 10. 已知边界
 
 - `browser-use` 的真实执行效果强依赖所用 LLM、网页复杂度、是否有登录态。
 - Feishu “转问卷”“分享表单”“开启表单分享”入口可能因产品版本、语言、权限不同而变化，所以项目里做的是“指令模板 + 结构化结果”方案，而不是硬编码某个按钮选择器。
 - 如果目标站点风控较强，单纯自托管本地浏览器可能不如 Browser Use Cloud 稳定。
 
-## 10. 后续建议
+## 11. 后续建议
 
-如果你下一步就要把它接到实际 MCP server，我建议优先补两件事：
+如果你下一步就要把它接到实际 MCP server / 生产环境，建议优先补三件事：
 
-1. 增加 API Key / 签名校验，避免任何人直接调用浏览器 Agent。
+1. 增加 API Key / 签名校验，避免任何人直接调用浏览器 Agent 或 MCP `/mcp` 端点。
 2. 把 `run_id`、请求摘要、最终结果、错误堆栈接到你们现有日志系统里，方便排查 Feishu 这类长链路问题。
+3. `DraftSessionStore` 当前是单进程内存版本，多副本部署需要改成 Redis 之类共享存储。

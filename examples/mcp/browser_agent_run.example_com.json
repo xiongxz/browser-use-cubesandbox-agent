@@ -1,0 +1,12 @@
+{
+  "tool": "browser_agent_run",
+  "title": "Smoke: open https://example.com and report page title",
+  "notes": "Cheapest end-to-end check: doesn't need any auth profile, only LLM creds. Should finish in <2 min.",
+  "arguments": {
+    "query": "Open the page and tell me the page title in one short sentence.",
+    "start_url": "https://example.com",
+    "allowed_domains": ["example.com"],
+    "max_steps": 6,
+    "timeout_sec": 120
+  }
+}

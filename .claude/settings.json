@@ -2,7 +2,16 @@
   "permissions": {
     "allow": [
       "WebFetch(domain:docs.cubesandbox.ai)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(git add *)",
+      "Bash(/usr/local/bin/git add *)",
+      "Bash(/usr/local/bin/git status *)",
+      "Bash(/opt/homebrew/bin/git add *)",
+      "Bash(/opt/homebrew/bin/git status *)",
+      "Bash(/opt/homebrew/bin/git check-ignore *)",
+      "Bash(whence git *)",
+      "Bash(python3 -c ' *)",
+      "Bash(/bin/bash -c 'cd \"/Users/bruinxz/Documents/New project/browser-use-cubesandbox-agent\" && git add -A && git status')"
     ]
   }
 }

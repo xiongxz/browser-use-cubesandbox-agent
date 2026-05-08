@@ -1,0 +1,12 @@
+{
+  "tool": "browser_agent_run",
+  "title": "Open the browser-use repo and report the star count",
+  "notes": "Slightly more LLM-heavy than the example.com smoke. Useful for confirming the agent can read structured GitHub data.",
+  "arguments": {
+    "query": "Open the repository page and tell me how many stars it currently has. Return the number and the repository URL.",
+    "start_url": "https://github.com/browser-use/browser-use",
+    "allowed_domains": ["github.com", "*.github.com"],
+    "max_steps": 12,
+    "timeout_sec": 240
+  }
+}
