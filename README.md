@@ -127,7 +127,22 @@ curl -fsS -X POST http://127.0.0.1:49999/v1/init \
   }'
 ```
 
-可注入的字段（白名单，未在表里的字段会 400）：
+也兼容外层包一层 `config` 的 env 风格 body。字段名大小写不敏感，也兼容下划线、连字符和常见 camelCase；无法识别的元数据字段会被忽略：
+
+```json
+{
+  "config": {
+    "AGENT_SESSION_ID": "sess_001",
+    "AGENT_TENANT_ID": "tenant_001",
+    "OPENAI_API_KEY": "sk-xxx",
+    "TASK_ID": "task_123"
+  }
+}
+```
+
+上面的 `OPENAI_API_KEY` 会写入实际运行配置里的 `llm_api_key`；`AGENT_SESSION_ID` / `AGENT_TENANT_ID` / `TASK_ID` 当前只作为上游元数据忽略，不影响初始化成功。
+
+可注入的字段：
 
 | 字段 | 类型 | 对应的 env |
 |---|---|---|
@@ -139,6 +154,8 @@ curl -fsS -X POST http://127.0.0.1:49999/v1/init \
 | `browser_window_width` | int (320-4096) | `BROWSER_WINDOW_WIDTH` |
 | `browser_window_height` | int (320-4096) | `BROWSER_WINDOW_HEIGHT` |
 | `feishu_default_profile_id` | string | `FEISHU_DEFAULT_PROFILE_ID` |
+
+额外兼容别名：`OPENAI_API_KEY` -> `llm_api_key`，`OPENAI_BASE_URL` / `OPENAI_API_BASE` -> `llm_base_url`，`OPENAI_MODEL` -> `llm_model`，`OPENAI_TEMPERATURE` -> `llm_temperature`。
 
 **注意事项**：
 

@@ -423,7 +423,8 @@ class RuntimeConfigUpdateRequest(BaseModel):
 
     Use this when the sandbox cannot accept env vars at creation time. Only
     non-null fields are merged into the in-memory overlay; existing values are
-    kept for keys that are omitted.
+    kept for keys that are omitted. The endpoint accepts either the canonical
+    snake_case fields directly or env-style keys nested under ``config``.
     """
 
     llm_base_url: str | None = Field(default=None, description="OpenAI-compatible base URL.")
@@ -434,6 +435,65 @@ class RuntimeConfigUpdateRequest(BaseModel):
     browser_window_width: int | None = Field(default=None, ge=320, le=4096)
     browser_window_height: int | None = Field(default=None, ge=320, le=4096)
     feishu_default_profile_id: str | None = Field(default=None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_runtime_config_payload(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        alias_map = {
+            "LLM_BASE_URL": "llm_base_url",
+            "OPENAI_BASE_URL": "llm_base_url",
+            "OPENAI_API_BASE": "llm_base_url",
+            "BASE_URL": "llm_base_url",
+            "LLM_API_KEY": "llm_api_key",
+            "OPENAI_API_KEY": "llm_api_key",
+            "API_KEY": "llm_api_key",
+            "LLM_MODEL": "llm_model",
+            "OPENAI_MODEL": "llm_model",
+            "MODEL": "llm_model",
+            "LLM_TEMPERATURE": "llm_temperature",
+            "OPENAI_TEMPERATURE": "llm_temperature",
+            "TEMPERATURE": "llm_temperature",
+            "BROWSER_HEADLESS": "browser_headless",
+            "BROWSER_WINDOW_WIDTH": "browser_window_width",
+            "BROWSER_WINDOW_HEIGHT": "browser_window_height",
+            "FEISHU_DEFAULT_PROFILE_ID": "feishu_default_profile_id",
+        }
+
+        canonical_keys = {
+            "llm_base_url",
+            "llm_api_key",
+            "llm_model",
+            "llm_temperature",
+            "browser_headless",
+            "browser_window_width",
+            "browser_window_height",
+            "feishu_default_profile_id",
+        }
+        for key in canonical_keys:
+            alias_map[key.upper()] = key
+
+        def normalize_key(key: Any) -> str:
+            with_word_breaks = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(key))
+            normalized = re.sub(r"[^0-9A-Za-z]+", "_", with_word_breaks).strip("_")
+            return normalized.upper()
+
+        payload: dict[str, Any] = {}
+        config_key = next((key for key in data if normalize_key(key) == "CONFIG"), None)
+        if config_key is not None and isinstance(data.get(config_key), dict):
+            payload.update(data[config_key])
+        for key, value in data.items():
+            if normalize_key(key) != "CONFIG":
+                payload[key] = value
+
+        normalized_payload: dict[str, Any] = {}
+        for key, value in payload.items():
+            canonical = alias_map.get(normalize_key(key))
+            if canonical:
+                normalized_payload[canonical] = value
+        return normalized_payload
 
 
 class RuntimeConfigSnapshot(BaseModel):
