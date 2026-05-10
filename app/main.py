@@ -23,6 +23,9 @@ from .models import (
     AuthProfileUpsertRequest,
     BrowserAgentRunRequest,
     BrowserAgentRunResponse,
+    FeishuFormFillPrepareRequest,
+    FeishuFormFillSubmitRequest,
+    PRESET_FEISHU_FORM_URL,
     RuntimeConfigUpdateRequest,
 )
 from .runtime_config import RuntimeConfigStore
@@ -47,7 +50,7 @@ def _mcp_enabled() -> bool:
 
 
 def _mcp_port() -> int:
-    return int(os.getenv("MCP_PORT", "49998"))
+    return int(os.getenv("MCP_PORT", "60000"))
 
 
 def _start_mcp_thread() -> None:
@@ -162,6 +165,8 @@ async def root() -> JSONResponse:
         "GET /v1/auth/storage-state/{profile_id}",
         "POST /v1/agent/run",
         "POST /v1/agent/stream",
+        "POST /v1/feishu/form-fill/prepare",
+        "POST /v1/feishu/form-fill/submit",
     ]
     ports: dict[str, Any] = {"envd": 49983, "app": s.port}
     if _mcp_enabled():
@@ -273,6 +278,44 @@ async def get_auth_profile(profile_id: str) -> AuthProfileSummary:
 async def run_agent(request: BrowserAgentRunRequest) -> BrowserAgentRunResponse:
     collector = EventCollector(run_id=make_run_id())
     return await execute_run(request, runtime_config.settings, collector, draft_store)
+
+
+@app.post("/v1/feishu/form-fill/prepare", response_model=BrowserAgentRunResponse)
+async def prepare_feishu_form_fill(request: FeishuFormFillPrepareRequest) -> BrowserAgentRunResponse:
+    collector = EventCollector(run_id=make_run_id())
+    run_request = BrowserAgentRunRequest(
+        mode="feishu_form_fill",
+        query=request.query,
+        form_url=PRESET_FEISHU_FORM_URL,
+        llm=request.llm,
+        require_human_confirmation=True,
+        human_confirmation_granted=False,
+    )
+    return await execute_run(run_request, runtime_config.settings, collector, draft_store)
+
+
+@app.post("/v1/feishu/form-fill/submit", response_model=BrowserAgentRunResponse)
+async def submit_feishu_form_fill(request: FeishuFormFillSubmitRequest) -> BrowserAgentRunResponse:
+    collector = EventCollector(run_id=make_run_id())
+    run_request = BrowserAgentRunRequest(
+        mode="feishu_form_fill",
+        query="",
+        form_url=PRESET_FEISHU_FORM_URL,
+        allowed_domains=request.allowed_domains,
+        headless=request.headless,
+        max_steps=request.max_steps,
+        timeout_sec=request.timeout_sec,
+        use_vision=request.use_vision,
+        llm=request.llm,
+        auth=request.auth,
+        require_human_confirmation=True,
+        human_confirmation_granted=True,
+        human_confirmation_notes=request.human_confirmation_notes,
+        draft_session_id=request.draft_session_id,
+        confirmed_answers=request.confirmed_answers,
+        feishu_field_ids=request.field_ids,
+    )
+    return await execute_run(run_request, runtime_config.settings, collector, draft_store)
 
 
 @app.post("/v1/agent/stream")

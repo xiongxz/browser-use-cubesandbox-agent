@@ -18,8 +18,8 @@ runtime:
     expected_status: 204
   expose_ports:
     - 49983
-    - 49998
     - 49999
+    - 60000
   writable_layer_size: 2G
 
 metadata:

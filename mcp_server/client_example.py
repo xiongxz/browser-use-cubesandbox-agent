@@ -13,8 +13,13 @@ Three usage modes:
          --case examples/mcp/browser_agent_run.example_com.json
 
        ./.venv/bin/python -m mcp_server.client_example \\
-         --case examples/mcp/browser_agent_run.example_com.json \\
-         --case examples/mcp/browser_agent_run.github_stars.json
+         --case examples/mcp/feishu_form_fill_prepare.json \\
+         --case examples/mcp/feishu_form_fill_submit.json
+
+   When cases are run sequentially, a ``draft_session_id`` returned by phase 1
+   is automatically injected into later case files that still contain a
+   ``REPLACE_WITH_...`` placeholder. This lets the Feishu form-fill prepare +
+   submit flow run end-to-end from one command.
 
 3. Override case-file fields at the CLI (handy for ``draft_session_id``).
 
@@ -35,7 +40,7 @@ Case file shape:
       "arguments": { ... }
     }
 
-Server URL defaults to ``http://127.0.0.1:49998/mcp`` (the dedicated MCP port
+Server URL defaults to ``http://127.0.0.1:60000/mcp`` (the dedicated MCP port
 when running the FastAPI app with ``ENABLE_MCP=true``). Override with
 ``--url`` or ``MCP_URL=...``.
 """
@@ -54,9 +59,11 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 
-DEFAULT_URL = os.getenv("MCP_URL", "http://127.0.0.1:49998/mcp")
+DEFAULT_URL = os.getenv("MCP_URL", "http://127.0.0.1:60000/mcp")
 EXPECTED_TOOLS = {
     "browser_agent_run",
+    "feishu_form_fill_prepare",
+    "feishu_form_fill_submit",
     "feishu_bitable_draft_form",
     "feishu_bitable_publish_form",
 }
@@ -124,6 +131,23 @@ def _apply_overrides(arguments: dict[str, Any], overrides: list[tuple[str, Any]]
     return out
 
 
+def _inject_context(arguments: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    """Replace common placeholders with values captured from previous cases."""
+
+    def walk(value: Any) -> Any:
+        if isinstance(value, str):
+            if "REPLACE_WITH_draft_session_id" in value and context.get("draft_session_id"):
+                return context["draft_session_id"]
+            return value
+        if isinstance(value, dict):
+            return {k: walk(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [walk(v) for v in value]
+        return value
+
+    return walk(arguments)
+
+
 def _detect_placeholders(arguments: dict[str, Any]) -> list[str]:
     """Walk arguments and report keys whose string values still contain a
     REPLACE_WITH_ marker. Helps users notice they forgot to fill in
@@ -180,9 +204,10 @@ def _summarize_result(tool: str, payload: dict[str, Any]) -> bool:
             expires = payload.get("draft_session_expires_at")
             if expires:
                 _print_info(f"expires_at:       {expires}")
-        for q in (payload.get("draft_questions") or [])[:5]:
+        draft_items = payload.get("draft_questions") or payload.get("draft_answers") or []
+        for q in draft_items[:5]:
             idx = q.get("index")
-            title = q.get("title")
+            title = q.get("title") or q.get("field_label")
             qtype = q.get("question_type")
             required = q.get("required")
             extras = []
@@ -191,14 +216,21 @@ def _summarize_result(tool: str, payload: dict[str, Any]) -> bool:
             if required is not None:
                 extras.append("required" if required else "optional")
             tag = f" [{', '.join(extras)}]" if extras else ""
-            _print_info(f"  Q{idx}: {title}{tag}")
-        if (more := len(payload.get("draft_questions") or [])) > 5:
+            answer = q.get("proposed_value")
+            suffix = f" -> {answer}" if answer else ""
+            _print_info(f"  Q{idx}: {title}{tag}{suffix}")
+        if (more := len(draft_items)) > 5:
             _print_info(f"  ... and {more - 5} more")
         if sid:
             print()
+            next_case = (
+                "examples/mcp/feishu_form_fill_submit.json"
+                if tool == "feishu_form_fill_prepare"
+                else "examples/mcp/feishu_bitable_publish_form.json"
+            )
             _print_info(
                 "Next step (phase 2): "
-                f"--case examples/mcp/feishu_bitable_publish_form.json "
+                f"--case {next_case} "
                 f"--set draft_session_id={sid}"
             )
         return True
@@ -210,6 +242,9 @@ def _summarize_result(tool: str, payload: dict[str, Any]) -> bool:
         _print_pass(msg)
         if (form_url := payload.get("form_url")):
             _print_info(f"form_url: {form_url}")
+        if (submission_result := payload.get("submission_result")):
+            submission_result = str(submission_result).strip().replace("\n", " ")
+            _print_info(f"submission_result: {submission_result[:200]}")
         if (final := payload.get("final_text")):
             final = final.strip().replace("\n", " ")
             _print_info(f"final_text: {final[:200]}")
@@ -223,11 +258,16 @@ def _summarize_result(tool: str, payload: dict[str, Any]) -> bool:
     return False
 
 
-async def _call_case(session: ClientSession, case_path: Path, overrides: list[tuple[str, Any]]) -> bool:
+async def _call_case(
+    session: ClientSession,
+    case_path: Path,
+    overrides: list[tuple[str, Any]],
+    context: dict[str, Any],
+) -> tuple[bool, dict[str, Any] | None]:
     case = _load_case(case_path)
     tool = case["tool"]
     title = case.get("title") or ""
-    arguments = _apply_overrides(case["arguments"], overrides)
+    arguments = _inject_context(_apply_overrides(case["arguments"], overrides), context)
 
     bad = _detect_placeholders(arguments)
     if bad:
@@ -236,7 +276,7 @@ async def _call_case(session: ClientSession, case_path: Path, overrides: list[tu
             "Fix the file in place, or pass --set "
             + ", --set ".join(f"{k}=<value>" for k in bad)
         )
-        return False
+        return False, None
 
     if tool not in EXPECTED_TOOLS:
         _print_info(
@@ -255,7 +295,7 @@ async def _call_case(session: ClientSession, case_path: Path, overrides: list[tu
         result = await session.call_tool(tool, arguments=arguments)
     except Exception as exc:  # noqa: BLE001
         _print_fail(f"call_tool raised: {type(exc).__name__}: {exc}")
-        return False
+        return False, None
 
     if result.isError:
         _print_fail(f"{tool}: tool reported isError=true")
@@ -263,16 +303,19 @@ async def _call_case(session: ClientSession, case_path: Path, overrides: list[tu
             txt = getattr(c, "text", None)
             if txt:
                 _print_info(txt[:300])
-        return False
+        return False, None
 
     payload = _decode_payload(result)
     if payload is None:
         _print_fail(f"{tool}: could not decode JSON payload from tool result")
         for c in result.content:
             _print_info(repr(c)[:200])
-        return False
+        return False, None
 
-    return _summarize_result(tool, payload)
+    ok = _summarize_result(tool, payload)
+    if payload.get("draft_session_id"):
+        context["draft_session_id"] = payload["draft_session_id"]
+    return ok, payload
 
 
 # ---- list_tools and main loop ------------------------------------------- #
@@ -324,8 +367,9 @@ async def _run(server_url: str, case_paths: list[Path], overrides: list[tuple[st
 
                 _print_section(f"call_tool ({len(case_paths)} case(s))")
                 all_ok = True
+                context: dict[str, Any] = {}
                 for path in case_paths:
-                    case_ok = await _call_case(session, path, overrides)
+                    case_ok, _payload = await _call_case(session, path, overrides, context)
                     all_ok = all_ok and case_ok
                 return 0 if all_ok else 3
     except Exception as exc:  # noqa: BLE001

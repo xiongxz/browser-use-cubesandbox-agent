@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .feishu_form_fill import PRESET_FEISHU_FORM_FIELD_IDS, display_time_to_timestamp_ms
 from .models import BrowserAgentRunRequest
 
 
@@ -13,9 +14,18 @@ FEISHU_DEFAULT_DOMAINS = [
 def effective_allowed_domains(request: BrowserAgentRunRequest) -> list[str]:
     if request.allowed_domains:
         return request.allowed_domains
-    if request.mode == "feishu_bitable_to_form":
+    if request.mode in {"feishu_bitable_to_form", "feishu_form_fill"}:
         return FEISHU_DEFAULT_DOMAINS.copy()
     return []
+
+
+def _feishu_field_ids_text(request: BrowserAgentRunRequest) -> str:
+    field_ids = {**PRESET_FEISHU_FORM_FIELD_IDS, **request.feishu_field_ids}
+    return (
+        f"姓名 field id {field_ids['name']} uses {{type:1,value:[{{type:'text',text:name}}]}}; "
+        f"参会时间 field id {field_ids['attendance_time']} uses {{type:5,value:timestamp_ms}}; "
+        f"人数/参会人数 field id {field_ids['attendance_count']} uses {{type:2,value:number}}."
+    )
 
 
 def build_task_prompt(request: BrowserAgentRunRequest) -> str:
@@ -70,6 +80,80 @@ def build_task_prompt(request: BrowserAgentRunRequest) -> str:
             f"- Human review notes to apply before sharing: {confirmation_notes or 'No extra edits requested; proceed with the confirmed draft.'}\n"
             "- The source user request is below.\n\n"
             f"User request: {request.query}"
+        )
+
+    if request.mode == "feishu_form_fill":
+        assert request.form_url is not None
+        if request.require_human_confirmation and not request.human_confirmation_granted:
+            return (
+                "You are operating a prebuilt Feishu questionnaire/form.\n"
+                "Current phase: draft answer preparation before final submission.\n"
+                "Goal:\n"
+                f"- Open this Feishu form URL: {request.form_url}\n"
+                "- Inspect the visible form title and each visible question/field in order.\n"
+                "- Parse the user's natural-language request and infer the best answer for each field.\n"
+                "- Fill the visible form fields if that helps you verify the mapping, but DO NOT click any final submit button such as '提交', 'Submit', '确认', or similar.\n"
+                "- Return awaiting_human_confirmation=true together with the captured form name and draft_answers.\n"
+                "- For every visible field, return one draft_answers item including: index, field_label, question_type, required, proposed_value, normalized_values, confidence, and source_excerpt when possible.\n"
+                "- If a field cannot be safely inferred, leave proposed_value empty/null, keep normalized_values empty, and mention the blocker in notes.\n"
+                "- Do not fabricate missing personal details.\n"
+                "- Stop only after you can present a complete reviewable draft answer set for human confirmation.\n"
+                "- If the page requires login or permission that is unavailable, stop and explain the exact blocker.\n"
+                "- The source user request is below.\n\n"
+                f"User request: {request.query}"
+            )
+
+        confirmation_notes = request.human_confirmation_notes.strip() if request.human_confirmation_notes else ""
+        confirmed_blocks: list[str] = []
+        for answer in request.confirmed_answers:
+            target = f"{answer.index}. {answer.field_label}" if answer.index is not None and answer.field_label else (
+                str(answer.index) if answer.index is not None else (answer.field_label or "unknown field")
+            )
+            if answer.field_key == "attendance_time" and answer.confirmed_value:
+                timestamp_ms = display_time_to_timestamp_ms(answer.confirmed_value)
+                final_value = f"display={answer.confirmed_value}; timestamp_ms={timestamp_ms}"
+            else:
+                values = answer.normalized_values or ([answer.confirmed_value] if answer.confirmed_value else [])
+                final_value = " / ".join(values) if values else ("<clear this field>" if answer.clear_value else "<keep drafted value>")
+            confirmed_blocks.append(f"- {target}: {final_value}")
+
+        confirmed_answers_text = "\n".join(confirmed_blocks) if confirmed_blocks else "- No explicit overrides; reuse the drafted answers from phase 1."
+        explicit_name = next((a.confirmed_value for a in request.confirmed_answers if a.field_key == "name" and a.confirmed_value), None)
+        explicit_time = next((a.confirmed_value for a in request.confirmed_answers if a.field_key == "attendance_time" and a.confirmed_value), None)
+        explicit_count = next((a.confirmed_value for a in request.confirmed_answers if a.field_key == "attendance_count" and a.confirmed_value), None)
+        return (
+            "You are operating a prebuilt Feishu questionnaire/form.\n"
+            "Current phase: final fill and submit after human confirmation.\n"
+            "Goal:\n"
+            f"- Open this Feishu form URL: {request.form_url}\n"
+            "- Before interacting with fields or clicking submit, ensure the custom action `install_feishu_form_submit_payload_guard` has been run. This guards the final Feishu request payload with the confirmed field values.\n"
+            "- The form fields are fixed and must be filled in this schema:\n"
+            "  * 姓名 -> string\n"
+            "  * 参会时间 -> timestamp in milliseconds (if the UI shows a date picker, use the display value but keep it semantically equal to the timestamp)\n"
+            "  * 人数 / 参会人数 -> number\n"
+            f"- The expected Feishu wire payload shape for this form is: {_feishu_field_ids_text(request)}\n"
+            "- Fill the form according to the confirmed answers below.\n"
+            "- IMPORTANT FIELD-BY-FIELD EXECUTION RULES:\n"
+            "  * First find the field labeled exactly '姓名'. Treat it as a plain text/string field, not a people picker. Fill it with the expected name value shown below.\n"
+            "  * For 姓名, try these text-field strategies until the name is visibly committed: click the input directly under/right of the label and type; if it stays blank, click the surrounding field card/container and type; if needed, clear the active field with Ctrl+A/Backspace and type again; press Tab, Enter, or click outside to commit. The control may be an input, textarea, or contenteditable-style custom Feishu text field.\n"
+            "  * If a suggestion dropdown appears while filling 姓名, do not treat it as required unless the text field refuses free text. Prefer leaving the literal confirmed name in the text field over selecting an unrelated person/entity.\n"
+            "  * Visually confirm the exact 姓名 value is still visible inside the field after blur/focus changes before moving on.\n"
+            "  * Then find the field labeled exactly '参会时间'. If the UI is a date picker, select/type the human-readable date that corresponds to the confirmed timestamp. Visually confirm the chosen date is visible.\n"
+            "  * Then find the numeric field labeled '人数' or '参会人数'. Click the numeric input, type the confirmed number, and visually confirm the number remains visible.\n"
+            "  * Do NOT rely only on field order if labels are visible; labels take priority.\n"
+            "  * If any field value is not visibly present after typing, retry that field instead of submitting.\n"
+            "- FINAL PRE-SUBMIT CHECK IS MANDATORY:\n"
+            "  * Before clicking submit, verify all three fields are visibly populated on screen: 姓名 is non-empty text, 参会时间 shows the expected date, and 人数/参会人数 shows the expected number.\n"
+            "  * If you cannot visually verify the 姓名 field is populated, do NOT submit. Report failure instead.\n"
+            f"- Expected concrete values for this run: 姓名={explicit_name or '(missing)'}; 参会时间={explicit_time or '(missing)'}; 参会人数={explicit_count or '(missing)'}.\n"
+            "- After all required fields are correctly filled, click the final submit button.\n"
+            "- Wait for the confirmation screen, toast, or success message, and capture the visible submission result.\n"
+            "- A successful run must end only after the form is truly submitted.\n"
+            "- If the form is already submitted, blocked by permissions, or contains validation errors, explain the exact blocker in notes and mark success=false.\n"
+            f"- Human confirmation notes: {confirmation_notes or 'No extra notes. If the user supplied new data after review, that should have been handled by rerunning the prepare phase instead of this submit phase.'}\n"
+            "- Confirmed answers to apply:\n"
+            f"{confirmed_answers_text}\n"
+            "- Confirmed answers are authoritative in this phase.\n"
         )
 
     prompt_lines = [

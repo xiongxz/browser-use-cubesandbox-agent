@@ -1,7 +1,10 @@
-FROM python:3.11-bookworm
+# Pin mutable tags by digest so BuildKit cache parents do not drift when tags move.
+ARG IMAGE_PLATFORM=linux/amd64
+FROM --platform=$IMAGE_PLATFORM ghcr.io/tencentcloud/cubesandbox-base@sha256:b83eee5be295b042560229b571e933ec785f055d4b6ecaca795b5c89ba0acd0a AS cubesandbox_base
+FROM --platform=$IMAGE_PLATFORM python:3.11-bookworm@sha256:2209d186b561bf8a8298f86e82f2d79cb45fb3b42e89b1e3b2e25329f87d8401
 
-COPY --from=ghcr.io/tencentcloud/cubesandbox-base:2026.16 /usr/bin/envd /usr/bin/envd
-COPY --from=ghcr.io/tencentcloud/cubesandbox-base:2026.16 /usr/local/bin/cube-entrypoint.sh /usr/local/bin/cube-entrypoint.sh
+COPY --from=cubesandbox_base /usr/bin/envd /usr/bin/envd
+COPY --from=cubesandbox_base /usr/local/bin/cube-entrypoint.sh /usr/local/bin/cube-entrypoint.sh
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -30,7 +33,7 @@ RUN pip install --no-cache-dir . \
     && python -m playwright install --with-deps chromium \
     && rm -rf /root/.cache/pip
 
-EXPOSE 49983 49998 49999
+EXPOSE 49983 49999 60000
 
 ENTRYPOINT ["/usr/local/bin/cube-entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "49999"]

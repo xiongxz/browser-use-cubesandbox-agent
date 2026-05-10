@@ -9,17 +9,25 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
-from browser_use import Agent, Browser, BrowserProfile, ChatOpenAI
+from browser_use import Agent, Browser, BrowserProfile, ChatOpenAI, Controller
+from browser_use.agent.views import ActionResult
+from browser_use.llm.messages import SystemMessage, UserMessage
 
 from .auth_store import AuthStore
 from .config import Settings
 from .draft_store import DraftSessionError, DraftSessionStore
+from .feishu_form_fill import PRESET_FEISHU_FORM_FIELD_IDS, display_time_to_timestamp_ms, parse_form_fill_query
 from .models import (
     BrowserAgentRunRequest,
     BrowserAgentRunResponse,
+    FeishuFormFillExtraction,
+    FeishuFormAnswerOverride,
+    FeishuFormFillOutput,
     FeishuBitableToFormOutput,
     GenericBrowserTaskOutput,
+    PRESET_FEISHU_FORM_URL,
     StreamEvent,
 )
 from .prompts import build_task_prompt, effective_allowed_domains
@@ -39,6 +47,292 @@ def _truncate(value: str | None, limit: int = 280) -> str | None:
     if len(value) <= limit:
         return value
     return value[: limit - 3] + "..."
+
+
+def _merge_confirmed_answers(
+    drafted: list[dict[str, Any]],
+    overrides: list[FeishuFormAnswerOverride],
+) -> list[FeishuFormAnswerOverride]:
+    merged_by_index: dict[int, FeishuFormAnswerOverride] = {}
+    merged_by_key: dict[str, FeishuFormAnswerOverride] = {}
+    merged_by_label: dict[str, FeishuFormAnswerOverride] = {}
+
+    for item in drafted:
+        confirmed_value = item.get("proposed_value")
+        normalized_values = [str(v) for v in (item.get("normalized_values") or []) if str(v).strip()]
+        if confirmed_value is None and not normalized_values:
+            continue
+        override = FeishuFormAnswerOverride(
+            index=item.get("index"),
+            field_key=item.get("field_key"),
+            field_label=item.get("field_label"),
+            confirmed_value=confirmed_value,
+            normalized_values=normalized_values,
+            clear_value=False,
+        )
+        if override.index is not None:
+            merged_by_index[override.index] = override
+        if override.field_key:
+            merged_by_key[override.field_key] = override
+        if override.field_label:
+            merged_by_label[override.field_label] = override
+
+    for override in overrides:
+        target: FeishuFormAnswerOverride | None = None
+        if override.index is not None:
+            target = merged_by_index.get(override.index)
+        if target is None and override.field_key:
+            target = merged_by_key.get(override.field_key)
+        if target is None and override.field_label:
+            target = merged_by_label.get(override.field_label)
+
+        updated = override if target is None else target.model_copy(
+            update={
+                "confirmed_value": override.confirmed_value if override.confirmed_value is not None else target.confirmed_value,
+                "normalized_values": override.normalized_values or target.normalized_values,
+                "clear_value": override.clear_value,
+                "field_key": target.field_key or override.field_key,
+                "field_label": target.field_label or override.field_label,
+                "index": target.index if target.index is not None else override.index,
+            }
+        )
+        if updated.index is not None:
+            merged_by_index[updated.index] = updated
+        if updated.field_key:
+            merged_by_key[updated.field_key] = updated
+        if updated.field_label:
+            merged_by_label[updated.field_label] = updated
+
+    ordered = sorted(merged_by_index.values(), key=lambda item: item.index or 0)
+    extras = [
+        item
+        for label, item in merged_by_label.items()
+        if item.index is None and label
+    ]
+    return ordered + sorted(extras, key=lambda item: item.field_label or "")
+
+
+def _confirmed_answer_by_key(
+    request: BrowserAgentRunRequest,
+    field_key: str,
+) -> FeishuFormAnswerOverride | None:
+    return next((answer for answer in request.confirmed_answers if answer.field_key == field_key), None)
+
+
+def _confirmed_answer_text(
+    request: BrowserAgentRunRequest,
+    field_key: str,
+) -> str:
+    answer = _confirmed_answer_by_key(request, field_key)
+    if answer is None:
+        raise ValueError(f"Missing confirmed answer for {field_key}")
+    values = answer.normalized_values or ([answer.confirmed_value] if answer.confirmed_value else [])
+    value = next((str(item).strip() for item in values if str(item).strip()), "")
+    if not value:
+        raise ValueError(f"Confirmed answer is empty for {field_key}")
+    return value
+
+
+def _resolve_feishu_form_field_ids(request: BrowserAgentRunRequest) -> dict[str, str]:
+    field_ids = {**PRESET_FEISHU_FORM_FIELD_IDS, **request.feishu_field_ids}
+    required = ("name", "attendance_time", "attendance_count")
+    missing = [key for key in required if not field_ids.get(key)]
+    if missing:
+        raise ValueError("Missing Feishu form field id mapping for: " + ", ".join(missing))
+    return field_ids
+
+
+def _build_feishu_form_submit_wire_data(request: BrowserAgentRunRequest) -> dict[str, Any]:
+    field_ids = _resolve_feishu_form_field_ids(request)
+    name = _confirmed_answer_text(request, "name")
+    time_answer = _confirmed_answer_by_key(request, "attendance_time")
+    if time_answer is None or not time_answer.confirmed_value:
+        raise ValueError("Missing confirmed answer for attendance_time")
+    timestamp_value = next(
+        (
+            str(item).strip()
+            for item in time_answer.normalized_values
+            if str(item).strip().isdigit()
+        ),
+        "",
+    )
+    timestamp_ms = int(timestamp_value) if timestamp_value else display_time_to_timestamp_ms(time_answer.confirmed_value)
+    attendance_count = int(_confirmed_answer_text(request, "attendance_count"))
+
+    return {
+        field_ids["name"]: {
+            "type": 1,
+            "value": [{"type": "text", "text": name}],
+        },
+        field_ids["attendance_time"]: {
+            "type": 5,
+            "value": timestamp_ms,
+        },
+        field_ids["attendance_count"]: {
+            "type": 2,
+            "value": attendance_count,
+        },
+    }
+
+
+def _build_feishu_form_fill_tools(
+    request: BrowserAgentRunRequest,
+    output_model: type[FeishuFormFillOutput],
+) -> Controller:
+    controller = Controller(output_model=output_model)
+    wire_data = _build_feishu_form_submit_wire_data(request)
+
+    @controller.action(
+        "Install the Feishu form submit payload guard. Call once after opening the preset Feishu form and before clicking submit. "
+        "It patches fetch/XMLHttpRequest so the final form submission carries the confirmed field IDs and values."
+    )
+    async def install_feishu_form_submit_payload_guard(browser_session) -> ActionResult:
+        page = await browser_session.must_get_current_page()
+        result = await page.evaluate(
+            """(wireData) => {
+                const guardKey = '__browserUseFeishuFormFillPayloadGuard';
+                window[guardKey] = { wireData, installedAt: Date.now() };
+
+                if (window.__browserUseFeishuFormFillPayloadGuardInstalled) {
+                    return { installed: true, alreadyInstalled: true, wireData };
+                }
+                window.__browserUseFeishuFormFillPayloadGuardInstalled = true;
+
+                function patchObject(obj) {
+                    let changed = false;
+                    if (!obj || typeof obj !== 'object') return false;
+
+                    if (typeof obj.data === 'string') {
+                        try {
+                            const parsedData = JSON.parse(obj.data);
+                            Object.assign(parsedData, wireData);
+                            obj.data = JSON.stringify(parsedData);
+                            changed = true;
+                        } catch (error) {
+                            // Not the Feishu form payload shape.
+                        }
+                    } else if (obj.data && typeof obj.data === 'object') {
+                        Object.assign(obj.data, wireData);
+                        changed = true;
+                    }
+
+                    for (const key of Object.keys(obj)) {
+                        const value = obj[key];
+                        if (value && typeof value === 'object') {
+                            changed = patchObject(value) || changed;
+                        }
+                    }
+                    return changed;
+                }
+
+                function patchBody(body) {
+                    if (typeof body === 'string') {
+                        try {
+                            const parsed = JSON.parse(body);
+                            const changed = patchObject(parsed);
+                            return { body: changed ? JSON.stringify(parsed) : body, changed };
+                        } catch (error) {
+                            return { body, changed: false };
+                        }
+                    }
+
+                    if (body instanceof URLSearchParams) {
+                        const data = body.get('data');
+                        if (!data) return { body, changed: false };
+                        try {
+                            const parsedData = JSON.parse(data);
+                            Object.assign(parsedData, wireData);
+                            const next = new URLSearchParams(body);
+                            next.set('data', JSON.stringify(parsedData));
+                            return { body: next, changed: true };
+                        } catch (error) {
+                            return { body, changed: false };
+                        }
+                    }
+
+                    return { body, changed: false };
+                }
+
+                const originalFetch = window.fetch.bind(window);
+                window.fetch = async function patchedFetch(input, init) {
+                    let nextInput = input;
+                    let nextInit = init ? { ...init } : init;
+
+                    try {
+                        if (nextInit && nextInit.body) {
+                            const patched = patchBody(nextInit.body);
+                            if (patched.changed) nextInit.body = patched.body;
+                        } else if (input instanceof Request) {
+                            const method = (input.method || 'GET').toUpperCase();
+                            if (method !== 'GET' && method !== 'HEAD') {
+                                const text = await input.clone().text();
+                                const patched = patchBody(text);
+                                if (patched.changed) {
+                                    nextInput = new Request(input, { body: patched.body });
+                                }
+                            }
+                        }
+                    } catch (error) {
+                        console.warn('Feishu form-fill payload guard fetch patch failed', error);
+                    }
+
+                    return originalFetch(nextInput, nextInit);
+                };
+
+                const originalSend = XMLHttpRequest.prototype.send;
+                XMLHttpRequest.prototype.send = function patchedSend(body) {
+                    try {
+                        const patched = patchBody(body);
+                        return originalSend.call(this, patched.changed ? patched.body : body);
+                    } catch (error) {
+                        console.warn('Feishu form-fill payload guard XHR patch failed', error);
+                        return originalSend.call(this, body);
+                    }
+                };
+
+                return { installed: true, alreadyInstalled: false, wireData };
+            }""",
+            wire_data,
+        )
+        return ActionResult(
+            extracted_content=f"Installed Feishu form submit payload guard: {result}",
+            long_term_memory="Installed Feishu form submit payload guard with confirmed field IDs and values.",
+        )
+
+    return controller
+
+
+async def _extract_form_fill_with_llm(
+    request: BrowserAgentRunRequest,
+    settings: Settings,
+) -> FeishuFormFillExtraction:
+    llm_settings = _resolve_llm_settings(request, settings)
+    llm = ChatOpenAI(
+        base_url=llm_settings["base_url"],
+        api_key=llm_settings["api_key"],
+        model=llm_settings["model"],
+        temperature=0,
+    )
+    now_text = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S %Z")
+    system = SystemMessage(
+        content=(
+            "You extract three fields from a Chinese user message for a preset meeting registration form. "
+            "Return structured JSON only.\n"
+            "Fields:\n"
+            "- name: attendee name\n"
+            "- attendance_time: raw human-readable time expression exactly as implied by the user, such as '5月8号' or '下周三下午'\n"
+            "- attendance_count: attendee count\n"
+            "Rules:\n"
+            "- Ignore action words like 登记下, 报名, 填写, 帮我处理.\n"
+            "- Do NOT convert times into timestamps.\n"
+            "- If a field is missing, leave it null.\n"
+            "- raw_value should be the shortest supporting span copied from the user query.\n"
+            f"- Current local time reference: {now_text}\n"
+        )
+    )
+    user = UserMessage(content=request.query)
+    result = await llm.ainvoke([system, user], output_format=FeishuFormFillExtraction)
+    return result.completion
 
 
 @dataclass
@@ -95,7 +389,7 @@ def _build_browser(
         if profile is None:
             raise ValueError(f"Auth profile not found: {auth.profile_id}")
         storage_state = str(profile.storage_state_path)
-    elif request.mode == "feishu_bitable_to_form":
+    elif request.mode in {"feishu_bitable_to_form", "feishu_form_fill"}:
         profile = auth_store.get_profile(settings.feishu_default_profile_id)
         if profile is not None:
             storage_state = str(profile.storage_state_path)
@@ -130,6 +424,8 @@ def _build_response(
     structured = None
     if request.mode == "feishu_bitable_to_form":
         structured = history.structured_output or history.get_structured_output(FeishuBitableToFormOutput)
+    elif request.mode == "feishu_form_fill":
+        structured = history.structured_output or history.get_structured_output(FeishuFormFillOutput)
     else:
         structured = history.structured_output or history.get_structured_output(GenericBrowserTaskOutput)
 
@@ -155,6 +451,34 @@ def _build_response(
             form_name=structured.form_name,
             awaiting_human_confirmation=is_waiting,
             draft_questions=structured.draft_questions,
+            current_url=current_url,
+            visited_urls=visited_urls,
+            steps=history.number_of_steps(),
+            duration_sec=duration_sec,
+            screenshots=screenshots,
+            errors=errors,
+            notes=structured.notes,
+            structured_output=structured.model_dump(),
+            history_excerpt=history_excerpt,
+        )
+
+    if isinstance(structured, FeishuFormFillOutput):
+        is_waiting = structured.awaiting_human_confirmation
+        return BrowserAgentRunResponse(
+            run_id=run_id,
+            success=structured.success and not is_waiting,
+            mode=request.mode,
+            final_text=(
+                ("Awaiting human confirmation for the drafted form answers." if is_waiting else None)
+                or structured.submission_result
+                or "; ".join(structured.notes)
+                or history.final_result()
+            ),
+            form_url=structured.form_url,
+            form_name=structured.form_name,
+            awaiting_human_confirmation=is_waiting,
+            draft_answers=structured.draft_answers,
+            submission_result=structured.submission_result,
             current_url=current_url,
             visited_urls=visited_urls,
             steps=history.number_of_steps(),
@@ -212,23 +536,41 @@ async def execute_run(
 
     browser: Browser | None = None
     started = time.perf_counter()
-    is_phase_two = (
-        request.mode == "feishu_bitable_to_form"
-        and bool(request.require_human_confirmation)
-        and request.human_confirmation_granted
-    )
+    is_feishu_mode = request.mode in {"feishu_bitable_to_form", "feishu_form_fill"}
+    is_phase_two = is_feishu_mode and bool(request.require_human_confirmation) and request.human_confirmation_granted
 
     try:
         # Phase 2 entry guard: consume the draft session (or refuse fast).
         if is_phase_two:
             assert request.draft_session_id is not None  # validator guarantees this
-            assert request.bitable_url is not None
             try:
-                await draft_store.consume(
+                session = await draft_store.consume(
                     session_id=request.draft_session_id,
-                    bitable_url=request.bitable_url,
+                    mode=request.mode,
+                    resource_url=request.bitable_url if request.mode == "feishu_bitable_to_form" else request.form_url,
                     profile_id=request.auth.profile_id if request.auth and request.auth.profile_id else None,
                 )
+                if request.mode == "feishu_form_fill":
+                    merged_answers = _merge_confirmed_answers(session.draft_answers, request.confirmed_answers)
+                    required_keys = {"name": "姓名", "attendance_time": "参会时间", "attendance_count": "参会人数"}
+                    present_keys = {
+                        answer.field_key
+                        for answer in merged_answers
+                        if answer.field_key and not answer.clear_value and (answer.confirmed_value or answer.normalized_values)
+                    }
+                    missing_fields = [label for key, label in required_keys.items() if key not in present_keys]
+                    if missing_fields:
+                        raise DraftSessionError(
+                            "Cannot submit yet; the following required fields still need confirmation or correction: "
+                            + "、".join(missing_fields)
+                            + ". Re-run the prepare phase if the user added more information."
+                        )
+                    request = request.model_copy(
+                        update={
+                            "query": request.query or session.query or "",
+                            "confirmed_answers": merged_answers,
+                        }
+                    )
             except DraftSessionError as exc:
                 duration_sec = round(time.perf_counter() - started, 3)
                 logger.warning(
@@ -256,6 +598,78 @@ async def execute_run(
                     history_excerpt=[],
                 )
 
+        if request.mode == "feishu_form_fill" and not is_phase_two:
+            await collector.emit(
+                "run_started",
+                {
+                    "mode": request.mode,
+                    "form_url": request.form_url or PRESET_FEISHU_FORM_URL,
+                    "phase": "prepare",
+                },
+            )
+            llm_extraction: FeishuFormFillExtraction | None = None
+            try:
+                llm_extraction = await _extract_form_fill_with_llm(request, settings)
+            except Exception:
+                logger.warning(
+                    "LLM extraction failed for run_id=%s; falling back to rule-based parsing",
+                    collector.run_id,
+                    exc_info=True,
+                )
+            form_name, draft_answers, notes = parse_form_fill_query(request.query, llm_extraction=llm_extraction)
+            response = BrowserAgentRunResponse(
+                run_id=collector.run_id,
+                success=False,
+                mode=request.mode,
+                final_text="Awaiting human confirmation for the drafted form answers.",
+                form_url=request.form_url or PRESET_FEISHU_FORM_URL,
+                form_name=form_name,
+                awaiting_human_confirmation=True,
+                draft_answers=draft_answers,
+                current_url=None,
+                visited_urls=[],
+                steps=0,
+                duration_sec=round(time.perf_counter() - started, 3),
+                screenshots=[],
+                errors=[],
+                notes=notes,
+                structured_output=FeishuFormFillOutput(
+                    success=False,
+                    form_url=request.form_url or PRESET_FEISHU_FORM_URL,
+                    form_name=form_name,
+                    awaiting_human_confirmation=True,
+                    draft_answers=draft_answers,
+                    submission_result=None,
+                    notes=notes,
+                ).model_dump(),
+                history_excerpt=[],
+            )
+            session = await draft_store.create(
+                mode=request.mode,
+                resource_url=request.form_url or PRESET_FEISHU_FORM_URL,
+                profile_id=request.auth.profile_id if request.auth and request.auth.profile_id else None,
+                draft_questions=[],
+                draft_answers=[answer.model_dump() for answer in response.draft_answers],
+                form_name=response.form_name,
+                query=request.query,
+            )
+            response.draft_session_id = session.session_id
+            response.draft_session_expires_at = session.expires_at
+            await collector.emit(
+                "run_completed",
+                {
+                    "success": response.success,
+                    "final_text": response.final_text,
+                    "form_url": response.form_url,
+                    "awaiting_human_confirmation": response.awaiting_human_confirmation,
+                    "draft_session_id": response.draft_session_id,
+                    "draft_session_expires_at": response.draft_session_expires_at,
+                    "steps": response.steps,
+                    "duration_sec": response.duration_sec,
+                },
+            )
+            return response
+
         llm_settings = _resolve_llm_settings(request, settings)
         llm = ChatOpenAI(
             base_url=llm_settings["base_url"],
@@ -270,22 +684,42 @@ async def execute_run(
                 "mode": request.mode,
                 "start_url": request.start_url,
                 "bitable_url": request.bitable_url,
+                "form_url": request.form_url,
                 "max_steps": request.max_steps,
                 "allowed_domains": effective_allowed_domains(request),
                 "llm_model": llm_settings["model"],
                 "auth_profile_id": request.auth.profile_id if request.auth and request.auth.profile_id else None,
-                "feishu_default_profile_id": settings.feishu_default_profile_id if request.mode == "feishu_bitable_to_form" else None,
+                "feishu_default_profile_id": settings.feishu_default_profile_id if is_feishu_mode else None,
             },
         )
 
         browser = _build_browser(request, settings, run_dir, auth_store)
         task = build_task_prompt(request)
-        output_model = FeishuBitableToFormOutput if request.mode == "feishu_bitable_to_form" else GenericBrowserTaskOutput
+        if request.mode == "feishu_bitable_to_form":
+            output_model = FeishuBitableToFormOutput
+        elif request.mode == "feishu_form_fill":
+            output_model = FeishuFormFillOutput
+        else:
+            output_model = GenericBrowserTaskOutput
+
+        controller = (
+            _build_feishu_form_fill_tools(request, FeishuFormFillOutput)
+            if request.mode == "feishu_form_fill" and is_phase_two
+            else None
+        )
+        initial_actions = (
+            [{"navigate": {"url": request.bitable_url or request.form_url or request.start_url}}]
+            if (request.bitable_url or request.form_url or request.start_url)
+            else None
+        )
+        if controller is not None and initial_actions is not None:
+            initial_actions.append({"install_feishu_form_submit_payload_guard": {}})
 
         agent = Agent(
             task=task,
             llm=llm,
             browser=browser,
+            controller=controller,
             output_model_schema=output_model,
             sensitive_data=request.auth.sensitive_data if request.auth and request.auth.sensitive_data else None,
             use_vision={
@@ -293,11 +727,7 @@ async def execute_run(
                 "always": True,
                 "never": False,
             }[request.use_vision],
-            initial_actions=[
-                {"navigate": {"url": request.bitable_url or request.start_url}}
-            ]
-            if (request.bitable_url or request.start_url)
-            else None,
+            initial_actions=initial_actions,
         )
 
         async def on_step_start(hooked_agent: Agent) -> None:
@@ -345,10 +775,31 @@ async def execute_run(
             and request.bitable_url
         ):
             session = await draft_store.create(
-                bitable_url=request.bitable_url,
+                mode=request.mode,
+                resource_url=request.bitable_url,
                 profile_id=request.auth.profile_id if request.auth and request.auth.profile_id else None,
                 draft_questions=[q.model_dump() for q in response.draft_questions],
+                draft_answers=[],
                 form_name=response.form_name,
+                query=request.query,
+            )
+            response.draft_session_id = session.session_id
+            response.draft_session_expires_at = session.expires_at
+        elif (
+            request.mode == "feishu_form_fill"
+            and not is_phase_two
+            and response.awaiting_human_confirmation
+            and response.draft_answers
+            and request.form_url
+        ):
+            session = await draft_store.create(
+                mode=request.mode,
+                resource_url=request.form_url,
+                profile_id=request.auth.profile_id if request.auth and request.auth.profile_id else None,
+                draft_questions=[],
+                draft_answers=[answer.model_dump() for answer in response.draft_answers],
+                form_name=response.form_name,
+                query=request.query,
             )
             response.draft_session_id = session.session_id
             response.draft_session_expires_at = session.expires_at
@@ -362,6 +813,7 @@ async def execute_run(
                 "awaiting_human_confirmation": response.awaiting_human_confirmation,
                 "draft_session_id": response.draft_session_id,
                 "draft_session_expires_at": response.draft_session_expires_at,
+                "submission_result": response.submission_result,
                 "current_url": response.current_url,
                 "steps": response.steps,
                 "duration_sec": response.duration_sec,

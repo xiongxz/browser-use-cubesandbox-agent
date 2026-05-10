@@ -27,10 +27,13 @@ from typing import Any
 @dataclass
 class DraftSession:
     session_id: str
-    bitable_url: str
+    mode: str
+    resource_url: str
     profile_id: str | None
     draft_questions: list[dict[str, Any]]
+    draft_answers: list[dict[str, Any]]
     form_name: str | None
+    query: str | None
     created_at: float
     expires_at: float
 
@@ -55,10 +58,13 @@ class DraftSessionStore:
     async def create(
         self,
         *,
-        bitable_url: str,
+        mode: str,
+        resource_url: str,
         profile_id: str | None,
         draft_questions: list[dict[str, Any]],
+        draft_answers: list[dict[str, Any]],
         form_name: str | None,
+        query: str | None,
     ) -> DraftSession:
         async with self._lock:
             self._evict_expired_locked()
@@ -66,10 +72,13 @@ class DraftSessionStore:
             now = time.time()
             session = DraftSession(
                 session_id=session_id,
-                bitable_url=bitable_url,
+                mode=mode,
+                resource_url=resource_url,
                 profile_id=profile_id,
                 draft_questions=list(draft_questions),
+                draft_answers=list(draft_answers),
                 form_name=form_name,
+                query=query,
                 created_at=now,
                 expires_at=now + self._ttl_sec,
             )
@@ -80,7 +89,8 @@ class DraftSessionStore:
         self,
         *,
         session_id: str,
-        bitable_url: str,
+        mode: str,
+        resource_url: str,
         profile_id: str | None,
     ) -> DraftSession:
         async with self._lock:
@@ -95,10 +105,14 @@ class DraftSessionStore:
                 raise DraftSessionError(
                     f"draft_session_id expired: {session_id}. Re-run the draft phase."
                 )
-            if session.bitable_url != bitable_url:
+            if session.mode != mode:
                 raise DraftSessionError(
-                    "draft_session_id does not match bitable_url. "
-                    f"Expected {session.bitable_url}, got {bitable_url}."
+                    f"draft_session_id mode mismatch. Expected {session.mode}, got {mode}."
+                )
+            if session.resource_url != resource_url:
+                raise DraftSessionError(
+                    "draft_session_id does not match the target resource URL. "
+                    f"Expected {session.resource_url}, got {resource_url}."
                 )
             if session.profile_id != profile_id:
                 raise DraftSessionError(

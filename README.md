@@ -2,11 +2,12 @@
 
 这是一个可以直接在 CubeSandbox 里构建为 template 的浏览器 Agent 项目，目标是把 `browser-use` 封装成标准 HTTP 服务，并同时提供普通 JSON 返回和 SSE 流式返回。
 
-项目包含两个重点能力：
+项目包含几个重点能力：
 
 1. 通用浏览器 Agent：传入 `query`，让 Agent 操作浏览器并返回最终结果。
 2. Feishu Showcase：把飞书多维表格转换为问卷，并返回最终问卷链接。
-3. Feishu 登录态注入：支持把 Playwright `storage_state` 保存成服务端 profile 并复用。
+3. Feishu 预置问卷填写：服务内置固定飞书问卷链接和固定字段 schema（姓名、参会时间、参会人数），调用方只需传自然语言描述，系统先解析确认，再正式提交。
+4. Feishu 登录态注入：支持把 Playwright `storage_state` 保存成服务端 profile 并复用。
 
 ## 1. 设计取舍
 
@@ -20,10 +21,12 @@
 
 `browser-use` 当前官方仓库在 GitHub README 中写明需要 Python `>=3.11`，而 CubeSandbox 官方 `bring-your-own-image` 文档给出的 `cubesandbox-base` 示例是 `ubuntu:22.04` 体系。为了避免自己再额外装 Python 3.11，本项目选择：
 
-- 业务镜像基于 `python:3.11-bookworm`
-- 再按 CubeSandbox 官方文档的推荐方式，从 `ghcr.io/tencentcloud/cubesandbox-base:2026.16` 注入 `envd` 和 `cube-entrypoint.sh`
+- 业务镜像基于 `python:3.11-bookworm@sha256:2209d186b561bf8a8298f86e82f2d79cb45fb3b42e89b1e3b2e25329f87d8401`
+- 再按 CubeSandbox 官方文档的推荐方式，从 `ghcr.io/tencentcloud/cubesandbox-base@sha256:b83eee5be295b042560229b571e933ec785f055d4b6ecaca795b5c89ba0acd0a` 注入 `envd` 和 `cube-entrypoint.sh`
 
 这样更稳，也更贴近 `browser-use` 的运行要求。
+
+这里的两个镜像都故意固定到完整 digest，而不是只写 tag。`python:3.11-bookworm` 是可变 tag，2026-05-08 可命中缓存的 index digest 是 `sha256:2209d186b561bf8a8298f86e82f2d79cb45fb3b42e89b1e3b2e25329f87d8401`（`linux/amd64` 子 manifest 为 `sha256:45003752429b5d332df28574833d70edce02cdadc617080e77ad2a622b8e2e29`），而 2026-05-10 该 tag 已经漂移到 `sha256:99f4240b31e5b9cf1e792420390b0d531022af3922b3d15681e7b818ca63fe37`。如果不 pin digest，BuildKit 会把 `RUN apt-get ...`、`pip install`、`playwright install` 等后续层都挂到新的 parent rootfs 下，旧的重缓存层就无法复用。`cubesandbox-base` 也固定到 `linux/amd64` 子 manifest，匹配 `agent.build.yaml` 里的 `platform: linux/amd64`。升级基础镜像时应该显式改 digest，并预期会触发一次完整重建。
 
 ## 2. 目录结构
 
@@ -50,6 +53,8 @@ browser-use-cubesandbox-agent/
 └── schemas
     ├── mcp.browser_agent_run.input.schema.json
     ├── mcp.feishu_bitable_draft_form.input.schema.json
+    ├── mcp.feishu_form_fill_prepare.input.schema.json
+    ├── mcp.feishu_form_fill_submit.input.schema.json
     ├── mcp.feishu_bitable_publish_form.input.schema.json
     └── mcp.tools.catalog.json
 ```
@@ -170,11 +175,22 @@ Feishu 示例请求（推荐：把 bitable URL 直接写在 `query` 里，服务
 }
 ```
 
+Feishu 预置问卷填写请求示例：
+
+```json
+{
+  "mode": "feishu_form_fill",
+  "query": "我叫张三，5月8号参会，3个人参加。"
+}
+```
+
 服务端自动推断规则：
 
-- **mode 自动推断**：`mode` 缺省时，如果 `query`（或 `bitable_url`）里包含飞书/Lark URL，自动升级为 `mode=feishu_bitable_to_form`。
+- **mode 自动推断**：
+  - 如果显式设了 `mode=feishu_form_fill`，服务会自动使用内置的预置问卷 URL
+  - 否则如果 `query`（或 `bitable_url`）里包含飞书/Lark 多维表格 URL，自动升级为 `mode=feishu_bitable_to_form`
 - **URL 抽取**：只接受 `*.feishu.cn` / `*.larksuite.com` / `*.larkoffice.com`；优先 `/base/` 或 `/wiki/` 路径；自动剥离结尾标点（中英文逗号、句号、括号、引号等）。
-- **HITL 默认开启**：feishu 模式下 `require_human_confirmation` 默认 `true`，进入审题阶段。如果要跳过审题（不推荐），显式传 `false`。
+- **HITL 默认开启**：两个 Feishu 模式下 `require_human_confirmation` 默认 `true`。bitable 模式会先停在“问卷草稿确认”，form-fill 模式会先停在“字段答案确认”。
 - **`human_confirmation_granted` 不会被自动推断**——它的语义就是"人类已审核"，必须由调用方在第二次请求中显式传 `true` 并附带 phase 1 返回的 `draft_session_id`。
 
 如果你还没把登录态存进服务端，也可以一次性直接传：
@@ -254,6 +270,39 @@ curl -N http://localhost:49999/v1/agent/stream \
   }'
 ```
 
+### `POST /v1/feishu/form-fill/prepare`
+
+专用 phase 1 接口：使用内置的预置飞书问卷 schema，把自然语言 `query` 解析成固定字段草稿，但不会提交。
+
+请求示例：
+
+```bash
+curl -X POST http://127.0.0.1:49999/v1/feishu/form-fill/prepare \
+  -H 'Content-Type: application/json' \
+  -d @examples/feishu-form-fill.prepare.sample.json
+```
+
+典型响应字段：
+
+- `awaiting_human_confirmation: true`
+- `draft_answers: [...]`
+- `form_name`
+- `draft_session_id`
+- `draft_session_expires_at`
+- 其中 `参会时间` 会先归一化成便于人确认的展示值，例如用户输入 `5月8号` 时，响应会展示成 `2026-05-08`；真正提交时才会转成毫秒级时间戳
+
+### `POST /v1/feishu/form-fill/submit`
+
+专用 phase 2 接口：带 `draft_session_id` 和人工确认后的字段值重新打开同一份预置问卷，正式填写并提交。
+
+请求示例：
+
+```bash
+curl -X POST http://127.0.0.1:49999/v1/feishu/form-fill/submit \
+  -H 'Content-Type: application/json' \
+  -d @examples/feishu-form-fill.submit.sample.json
+```
+
 ## 4. Feishu 登录建议
 
 飞书这类站点通常存在登录态、组织权限、风控验证等问题。这个项目现在提供了专门的登录态管理接口。
@@ -312,13 +361,13 @@ with sync_playwright() as p:
 
 ## 5. Feishu Human-in-the-Loop
 
-Feishu 多维表格转问卷拆成两阶段，对外既可以直接调 HTTP，也可以通过两个独立的 MCP tool 调用（见第 8 节）。两阶段之间用一个**服务端签发的 `draft_session_id`** 绑定：
+Feishu 两类流程都拆成两阶段，对外既可以直接调 HTTP，也可以通过独立的 MCP tool 调用（见第 8 节）。两阶段之间都用一个**服务端签发的 `draft_session_id`** 绑定：
 
 ```
-phase 1 (draft) ── 返回 draft_session_id ──► 人类审阅 draft_questions
+phase 1 (draft) ── 返回 draft_session_id ──► 人类审阅 draft_questions / draft_answers
                                                       │
                                                       ▼
-phase 2 (publish) ── 必须回传同一个 draft_session_id ──► 服务端校验通过后发布
+phase 2 (submit/publish) ── 必须回传同一个 draft_session_id ──► 服务端校验通过后继续
 ```
 
 ### 服务端校验规则
@@ -328,7 +377,7 @@ phase 2 (publish) ── 必须回传同一个 draft_session_id ──► 服务
 | 校验项 | 不通过的后果 |
 |---|---|
 | session 存在且未过期 | 立刻 `run_failed`，提示重新跑 phase 1 |
-| `bitable_url` 与 phase 1 一致 | 立刻 `run_failed`，提示 URL 不匹配 |
+| 目标 URL（`bitable_url` 或 `form_url`）与 phase 1 一致 | 立刻 `run_failed`，提示 URL 不匹配 |
 | `auth.profile_id` 与 phase 1 一致 | 立刻 `run_failed`，提示 profile 不匹配 |
 
 校验通过后**会立即从内存里删除**该 session（一次性消费），防止重放。如果 phase 2 因为浏览器侧出错失败，需要重新跑 phase 1 拿新的 `draft_session_id`。
@@ -369,6 +418,23 @@ curl -X POST http://127.0.0.1:49999/v1/agent/run \
   -H 'Content-Type: application/json' \
   -d @examples/feishu-run.confirm.sample.json
 ```
+
+### 预置问卷填写流程
+
+1. 解析并生成答案草稿：调用 `POST /v1/feishu/form-fill/prepare`
+
+   响应里会带：
+   - `awaiting_human_confirmation: true`
+   - `draft_answers: [...]`
+   - `form_name`
+   - `draft_session_id`
+   - `draft_session_expires_at`
+   - 固定字段是：`姓名`（string）、`参会时间`（phase 1 展示为可读日期，phase 2 提交时转换为毫秒时间戳）、`参会人数`（number）
+
+2. 人工确认或修正字段：调用 `POST /v1/feishu/form-fill/submit`
+
+   可以通过 `confirmed_answers` 只覆盖个别字段，未覆盖的字段会复用 phase 1 的草稿答案。
+   如果用户在 phase 1 结果返回后又补充了新的自然语言信息，不应该直接调 submit，而应该重新调 prepare 进入新一轮“解析 -> 确认”流程。
 
 ## 6. 本地运行
 
@@ -443,7 +509,7 @@ docker push your-registry.example.com/browser-use-cubesandbox-agent:latest
 
 - `49983` 是 `envd` 控制面端口，不要给业务服务占用。
 - 业务 HTTP 服务监听 `49999`。
-- `ENABLE_MCP=true` 时还会在 `49998` 起一个 MCP streamable-HTTP server（详见 §9）。即便不启用 MCP，把 49998 一起 expose 也无副作用。
+- `ENABLE_MCP=true` 时还会在 `60000` 起一个 MCP streamable-HTTP server（详见 §9）。即便不启用 MCP，把 60000 一起 expose 也无副作用。
 - 模板探针应使用 `49983/health`，这是 CubeSandbox 官方文档要求的 `envd` 探针。
 
 ```bash
@@ -451,7 +517,7 @@ cubemastercli tpl create-from-image \
   --image your-registry.example.com/browser-use-cubesandbox-agent:latest \
   --writable-layer-size 2G \
   --expose-port 49983 \
-  --expose-port 49998 \
+  --expose-port 60000 \
   --expose-port 49999 \
   --probe 49983 \
   --probe-path /health
@@ -461,15 +527,22 @@ cubemastercli tpl create-from-image \
 
 ## 8. MCP Tool Schema
 
-仓库提供三个 MCP tool 定义，都映射到同一个 HTTP endpoint `POST /v1/agent/run`：
+仓库提供五个 MCP tool 定义：
 
 | Tool 名称 | inputSchema | 用途 |
 |---|---|---|
 | `browser_agent_run` | `mcp.browser_agent_run.input.schema.json` | 通用浏览器任务，没有 Feishu 特定流程 |
+| `feishu_form_fill_prepare` | `mcp.feishu_form_fill_prepare.input.schema.json` | Feishu 预置问卷填写的**第一步**：解析固定三字段并产出待确认答案草稿 |
+| `feishu_form_fill_submit` | `mcp.feishu_form_fill_submit.input.schema.json` | Feishu 预置问卷填写的**第二步**：在没有新增自然语言补充的前提下，按确认结果正式提交 |
 | `feishu_bitable_draft_form` | `mcp.feishu_bitable_draft_form.input.schema.json` | Feishu 多维表格转问卷的**第一步**：抓取草稿题目，等待人工确认 |
 | `feishu_bitable_publish_form` | `mcp.feishu_bitable_publish_form.input.schema.json` | Feishu 多维表格转问卷的**第二步**：人工确认后开启表单分享，返回最终问卷链接 |
 
-`schemas/mcp.tools.catalog.json` 用 `bodyTemplate` 把 MCP 的入参映射成 HTTP body：两个 Feishu tool 都把 `mode`、`require_human_confirmation`、`human_confirmation_granted` 写死，调用方不需要再关心这些状态字段。
+其中：
+
+- `browser_agent_run` / `feishu_bitable_*` 仍然映射到 `POST /v1/agent/run`
+- `feishu_form_fill_prepare` / `feishu_form_fill_submit` 映射到专用 HTTP endpoint
+
+`schemas/mcp.tools.catalog.json` 用 `bodyTemplate` 把 MCP 的入参映射成 HTTP body，调用方不需要再关心内部状态字段。
 
 ### 两个 Feishu tool 的调用顺序
 
@@ -506,7 +579,7 @@ feishu_bitable_draft_form(query)
 挂到自己的 MCP server 时的最小做法：
 
 1. 用对应的 `inputSchema` 约束 tool 入参。
-2. MCP handler 按 `bodyTemplate` 拼接 body，转发到 `POST /v1/agent/run`。
+2. MCP handler 按 `bodyTemplate` 拼接 body，转发到对应的 HTTP endpoint（`/v1/agent/run` 或 `/v1/feishu/form-fill/*`）。
 3. **从 draft tool 的响应里抽出 `draft_session_id`**，作为后续 publish tool 的入参之一传回（一般由你的 MCP host / 上游 LLM 在两次调用之间保管这个 token）。
 4. 把 HTTP JSON 返回原样作为 tool result，或裁掉 `screenshots`、`history_excerpt` 这类大字段。
 5. tool description 中已经写明调用顺序约束（"Only call after ... has returned a draft"），让上游 LLM 不会乱序触发。
@@ -523,23 +596,23 @@ ENABLE_MCP=true ./scripts/run_local.sh
 ENABLE_MCP=true uvicorn app.main:app --host 0.0.0.0 --port 49999
 ```
 
-启用后 FastAPI 会**额外起一个线程**跑 MCP server，默认监听 `0.0.0.0:49998/mcp`（与业务 HTTP 49999 分开）。`GET /` 自检接口会回显 `"mcp_enabled": true` 和 `ports.mcp` 端口号。
+启用后 FastAPI 会**额外起一个线程**跑 MCP server，默认监听 `0.0.0.0:60000/mcp`（与业务 HTTP 49999 分开）。`GET /` 自检接口会回显 `"mcp_enabled": true` 和 `ports.mcp` 端口号。
 
-CubeSandbox 模板要把 49998 一起 expose（[Dockerfile](Dockerfile) / [agent.build.yaml](agent.build.yaml) 已经配好）：
+CubeSandbox 模板要把 60000 一起 expose（[Dockerfile](Dockerfile) / [agent.build.yaml](agent.build.yaml) 已经配好）：
 
 ```bash
 cubemastercli tpl create-from-image \
   --image your-registry.example.com/browser-use-cubesandbox-agent:latest \
   --writable-layer-size 2G \
   --expose-port 49983 \
-  --expose-port 49998 \
+  --expose-port 60000 \
   --expose-port 49999 \
   --probe 49983 --probe-path /health
 ```
 
-放到 sandbox 里之后 MCP 的公网 URL 是 `https://49998-<sandbox_id>.cube.app/mcp`。
+放到 sandbox 里之后 MCP 的公网 URL 是 `https://60000-<sandbox_id>.cube.app/mcp`。
 
-工具集合与 [`schemas/mcp.tools.catalog.json`](schemas/mcp.tools.catalog.json) 一致：`browser_agent_run` / `feishu_bitable_draft_form` / `feishu_bitable_publish_form`，3 个工具内部都通过 `httpx` 转回 `POST /v1/agent/run`，所以业务行为、HITL、`draft_session_id` 校验都跟直连 HTTP 一模一样。
+工具集合与 [`schemas/mcp.tools.catalog.json`](schemas/mcp.tools.catalog.json) 一致：`browser_agent_run` / `feishu_form_fill_prepare` / `feishu_form_fill_submit` / `feishu_bitable_draft_form` / `feishu_bitable_publish_form`。其中 form-fill 两个工具走专用 HTTP endpoint，其余工具走 `POST /v1/agent/run`；所有工具最终都复用同一套服务端执行逻辑和 `draft_session_id` 校验。
 
 ### 单独启动（不挂 FastAPI）
 
@@ -550,7 +623,7 @@ cubemastercli tpl create-from-image \
 ./.venv/bin/python -m mcp_server.server
 
 # Streamable HTTP，独占端口
-MCP_HOST=0.0.0.0 MCP_PORT=49998 \
+MCP_HOST=0.0.0.0 MCP_PORT=60000 \
 ./.venv/bin/python -m mcp_server.server --transport streamable-http
 ```
 
@@ -567,17 +640,19 @@ ENABLE_MCP=true ./scripts/run_local.sh &
 ./.venv/bin/python -m mcp_server.client_example
 # 期望:
 #   PASS MCP session initialized (server=browser-use-cubesandbox-agent ...)
-#   PASS all 3 expected tools registered
+#   PASS all expected tools registered
 ```
 
 **2. 用 case 文件触发真实 tool 调用**
 
-`examples/mcp/` 下放好了 4 个 case JSON，全部走"`tool` + `title` + `arguments`" 的格式（**注意它跟 `examples/feishu-run.sample.json` 那种 HTTP body 是不同形态**——后者是给 `POST /v1/agent/run` 用的，前者只是 MCP 工具入参）：
+`examples/mcp/` 下放好了 6 个 case JSON，全部走"`tool` + `title` + `arguments`" 的格式（**注意它跟 `examples/feishu-run.sample.json` 那种 HTTP body 是不同形态**——后者是给 HTTP endpoint 用的，前者只是 MCP 工具入参）：
 
 | 文件 | 工具 | 用途 |
 |---|---|---|
 | `browser_agent_run.example_com.json` | `browser_agent_run` | 最便宜的端到端冒烟，只要 LLM 凭据 |
 | `browser_agent_run.github_stars.json` | `browser_agent_run` | 稍重一点，验证读取 GitHub 结构化数据 |
+| `feishu_form_fill_prepare.json` | `feishu_form_fill_prepare` | Feishu 预置问卷填写 phase 1（要登录态 profile） |
+| `feishu_form_fill_submit.json` | `feishu_form_fill_submit` | Feishu 预置问卷填写 phase 2，含 `draft_session_id` 占位符 |
 | `feishu_bitable_draft_form.json` | `feishu_bitable_draft_form` | Feishu 转问卷 phase 1（要登录态 profile） |
 | `feishu_bitable_publish_form.json` | `feishu_bitable_publish_form` | Feishu 转问卷 phase 2，含 `draft_session_id` 占位符 |
 
@@ -627,7 +702,7 @@ PASS feishu_bitable_draft_form: phase 1 returned a draft for human review
 **指定别的 MCP URL（分离部署 / sandbox 公网）**
 
 ```bash
-MCP_URL=https://49998-<sandbox_id>.cube.app/mcp \
+MCP_URL=https://60000-<sandbox_id>.cube.app/mcp \
   ./.venv/bin/python -m mcp_server.client_example \
   --case examples/mcp/browser_agent_run.example_com.json
 ```

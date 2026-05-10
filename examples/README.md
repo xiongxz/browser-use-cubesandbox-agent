@@ -56,3 +56,28 @@ curl -N -X POST http://127.0.0.1:49999/v1/agent/stream \
 专用于飞书多维表格转问卷的流程，支持两阶段确认机制。
 
 见 [feishu-run.sample.json](./feishu-run.sample.json) 和 [feishu-run.confirm.sample.json](./feishu-run.confirm.sample.json)。
+
+## 飞书预置问卷填写 (feishu_form_fill)
+
+专用于“服务内置固定飞书问卷 + 一段自然语言描述 -> 解析固定字段 -> 人工确认 -> 正式提交”的两阶段流程。
+
+### Phase 1：生成待确认答案草稿
+
+```bash
+curl -X POST http://127.0.0.1:49999/v1/feishu/form-fill/prepare \
+  -H "Content-Type: application/json" \
+  -d @examples/feishu-form-fill.prepare.sample.json
+```
+
+### Phase 2：带确认后的字段值正式提交
+
+```bash
+curl -X POST http://127.0.0.1:49999/v1/feishu/form-fill/submit \
+  -H "Content-Type: application/json" \
+  -d @examples/feishu-form-fill.submit.sample.json
+```
+
+相关 MCP 调用示例见：
+
+- [examples/mcp/feishu_form_fill_prepare.json](./mcp/feishu_form_fill_prepare.json)
+- [examples/mcp/feishu_form_fill_submit.json](./mcp/feishu_form_fill_submit.json)

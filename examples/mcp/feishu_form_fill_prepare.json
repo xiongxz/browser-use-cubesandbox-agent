@@ -1,0 +1,8 @@
+{
+  "tool": "feishu_form_fill_prepare",
+  "title": "Phase 1: parse draft answers for the preset Feishu form",
+  "notes": "The preset questionnaire URL and field schema are built into the service. This phase only parses and normalizes the natural-language input for review.",
+  "arguments": {
+    "query": "我叫张三，5月8号参会，3个人参加。"
+  }
+}

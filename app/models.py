@@ -10,6 +10,8 @@ from pydantic import BaseModel, Field, model_validator
 _FEISHU_HOST_SUFFIXES = ("feishu.cn", "larksuite.com", "larkoffice.com")
 _URL_PATTERN = re.compile(r"https?://[^\s<>\"'，。；：、！？「」【】（）]+", re.UNICODE)
 _TRAILING_PUNCT = "，。；：、！？,.;:!?）)]】」'\"<>"
+PRESET_FEISHU_FORM_URL = "https://lexmount.feishu.cn/share/base/form/shrcnMEX6kDGkDArxCLgnsIWR8f"
+PRESET_FEISHU_FORM_NAME = "参会登记问卷"
 
 
 def extract_feishu_url(text: str | None) -> str | None:
@@ -40,6 +42,36 @@ def extract_feishu_url(text: str | None) -> str | None:
 
     preferred = [u for u in candidates if "/base/" in u or "/wiki/" in u]
     return preferred[0] if preferred else candidates[0]
+
+
+def extract_feishu_form_url(text: str | None) -> str | None:
+    """Pick the best Feishu/Lark form URL out of free-form text."""
+
+    if not text:
+        return None
+
+    candidates: list[str] = []
+    for raw in _URL_PATTERN.findall(text):
+        url = raw.rstrip(_TRAILING_PUNCT)
+        try:
+            parsed = urlparse(url)
+        except ValueError:
+            continue
+        host = (parsed.hostname or "").lower()
+        if not host:
+            continue
+        if any(host == suffix or host.endswith("." + suffix) for suffix in _FEISHU_HOST_SUFFIXES):
+            candidates.append(url)
+
+    if not candidates:
+        return None
+
+    preferred = [
+        u
+        for u in candidates
+        if "/share/base/form/" in u or "/base/form/" in u or "form" in (urlparse(u).path or "")
+    ]
+    return preferred[0] if preferred else None
 
 
 class LLMOverride(BaseModel):
@@ -73,14 +105,18 @@ class BrowserAgentRunRequest(BaseModel):
         default="",
         description="Natural language instruction for the browser agent.",
     )
-    mode: Literal["general", "feishu_bitable_to_form"] | None = Field(
+    mode: Literal["general", "feishu_bitable_to_form", "feishu_form_fill"] | None = Field(
         default=None,
-        description="Execution mode. Use feishu_bitable_to_form for the dedicated showcase. Auto-detected when omitted and query contains a Feishu URL.",
+        description="Execution mode. Use feishu_bitable_to_form for bitable -> questionnaire conversion, or feishu_form_fill for filling a prebuilt Feishu questionnaire from natural language. Auto-detected when omitted and the request contains a recognizable Feishu URL.",
     )
     start_url: str | None = Field(default=None, description="Optional start URL for the first navigation step.")
     bitable_url: str | None = Field(
         default=None,
         description="Feishu bitable URL. Required when mode=feishu_bitable_to_form.",
+    )
+    form_url: str | None = Field(
+        default=None,
+        description="Feishu questionnaire/form URL. When mode=feishu_form_fill and omitted, the server falls back to the built-in preset form URL.",
     )
     allowed_domains: list[str] = Field(
         default_factory=list,
@@ -106,40 +142,55 @@ class BrowserAgentRunRequest(BaseModel):
         default=None,
         description="Phase-2 binding token. Pass back the draft_session_id returned by the draft phase response so the server can validate the publish call.",
     )
+    confirmed_answers: list["FeishuFormAnswerOverride"] = Field(
+        default_factory=list,
+        description="Optional confirmed or corrected field values for mode=feishu_form_fill phase 2. When omitted, the server reuses the phase-1 drafted values.",
+    )
+    feishu_field_ids: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Optional Feishu form field id mapping for mode=feishu_form_fill phase 2. "
+            "Keys: name, attendance_time, attendance_count. When omitted, the built-in preset form mapping is used."
+        ),
+    )
     llm: LLMOverride | None = Field(default=None)
     auth: BrowserAuthConfig | None = Field(default=None)
 
     @model_validator(mode="after")
     def validate_mode(self) -> "BrowserAgentRunRequest":
-        # 1. Auto-promote to feishu mode when query/bitable_url contains a Feishu URL
+        # 1. Auto-promote to a Feishu mode when explicit URLs are present.
         # Only auto-detect when mode is not explicitly set
         if self.mode is None:
-            extracted = extract_feishu_url(self.query) or extract_feishu_url(self.bitable_url or "")
-            if extracted:
+            extracted_form = self.form_url or extract_feishu_form_url(self.query)
+            extracted_bitable = self.bitable_url or extract_feishu_url(self.query)
+            if extracted_form:
+                self.mode = "feishu_form_fill"
+                self.form_url = extracted_form
+            elif extracted_bitable:
                 self.mode = "feishu_bitable_to_form"
-                if not self.bitable_url:
-                    self.bitable_url = extracted
+                self.bitable_url = extracted_bitable
             else:
                 self.mode = "general"
 
-        # 2. HITL fields are only meaningful in feishu mode
+        # 2. HITL fields are only meaningful in Feishu modes.
         hitl_explicit = (
             self.require_human_confirmation is True
             or self.human_confirmation_granted is True
             or bool(self.human_confirmation_notes)
             or bool(self.draft_session_id)
+            or bool(self.confirmed_answers)
         )
-        if self.mode != "feishu_bitable_to_form" and hitl_explicit:
+        if self.mode not in {"feishu_bitable_to_form", "feishu_form_fill"} and hitl_explicit:
             raise ValueError(
                 "require_human_confirmation / human_confirmation_granted / "
-                "human_confirmation_notes / draft_session_id only apply to "
-                "mode=feishu_bitable_to_form. Either include a Feishu/Lark URL "
-                "in query so mode is auto-detected, or set mode explicitly."
+                "human_confirmation_notes / draft_session_id / confirmed_answers only apply to "
+                "mode=feishu_bitable_to_form or mode=feishu_form_fill. Either include a recognized "
+                "Feishu/Lark URL in query so mode is auto-detected, or set mode explicitly."
             )
 
         # 3. Default require_human_confirmation per mode
         if self.require_human_confirmation is None:
-            self.require_human_confirmation = self.mode == "feishu_bitable_to_form"
+            self.require_human_confirmation = self.mode in {"feishu_bitable_to_form", "feishu_form_fill"}
 
         # 4. mode-specific required fields
         if self.mode == "general":
@@ -156,9 +207,19 @@ class BrowserAgentRunRequest(BaseModel):
                 )
             if not self.query.strip():
                 self.query = "请将这个飞书多维表格转换为问卷，并返回最终问卷链接。"
+        elif self.mode == "feishu_form_fill":
+            if not self.form_url:
+                self.form_url = extract_feishu_form_url(self.query) or PRESET_FEISHU_FORM_URL
+            if not self.form_url:
+                raise ValueError(
+                    "feishu_form_fill requires a Feishu questionnaire/form URL. "
+                    "Pass it as form_url, or include a https://*.feishu.cn/... form link inside query."
+                )
+            if not self.query.strip() and not self.human_confirmation_granted:
+                raise ValueError("query is required for the draft phase when mode=feishu_form_fill")
 
         # 5. Phase-2 must include draft_session_id; phase-1 must NOT
-        if self.mode == "feishu_bitable_to_form":
+        if self.mode in {"feishu_bitable_to_form", "feishu_form_fill"}:
             if self.human_confirmation_granted and not self.draft_session_id:
                 raise ValueError(
                     "human_confirmation_granted=true requires draft_session_id. "
@@ -187,6 +248,62 @@ class FeishuQuestionDraft(BaseModel):
     required: bool | None = Field(default=None, description="Whether the question is marked required if visible.")
 
 
+class FeishuFormAnswerDraft(BaseModel):
+    index: int = Field(description="1-based order of the question in the visible form.")
+    field_key: str = Field(description="Stable internal key for the preset field.")
+    field_label: str = Field(description="Visible field or question label.")
+    question_type: str | None = Field(default=None, description="Detected field type if visible, otherwise null.")
+    required: bool | None = Field(default=None, description="Whether the field is marked required if visible.")
+    proposed_value: str | None = Field(
+        default=None,
+        description="Proposed answer derived from the user's natural-language query. Null when the agent could not infer a safe answer.",
+    )
+    raw_value: str | None = Field(
+        default=None,
+        description="Raw fragment extracted from the user query before normalization.",
+    )
+    normalized_values: list[str] = Field(
+        default_factory=list,
+        description="Structured option values for choice-style fields. Use one item for single-select and multiple items for checkbox-like fields.",
+    )
+    confidence: Literal["high", "medium", "low"] | None = Field(
+        default=None,
+        description="How confident the agent is that the proposed answer matches the user's intent.",
+    )
+    source_excerpt: str | None = Field(
+        default=None,
+        description="Short excerpt from the original user query that supports the answer, when available.",
+    )
+
+
+class FeishuFormAnswerOverride(BaseModel):
+    index: int | None = Field(default=None, description="Target field index from the phase-1 draft.")
+    field_key: str | None = Field(default=None, description="Stable internal key from the phase-1 draft.")
+    field_label: str | None = Field(default=None, description="Target field label from the phase-1 draft.")
+    confirmed_value: str | None = Field(
+        default=None,
+        description="Human-confirmed final answer. Use null together with clear_value=true to intentionally clear the field.",
+    )
+    normalized_values: list[str] = Field(
+        default_factory=list,
+        description="Optional structured option values that should replace the drafted selection list.",
+    )
+    clear_value: bool = Field(
+        default=False,
+        description="When true, intentionally clear the previously drafted answer for this field.",
+    )
+
+    @model_validator(mode="after")
+    def validate_target(self) -> "FeishuFormAnswerOverride":
+        if self.index is None and not self.field_label and not self.field_key:
+            raise ValueError("Each confirmed_answers item requires index, field_key, or field_label")
+        if self.confirmed_value is None and not self.normalized_values and not self.clear_value:
+            raise ValueError(
+                "Each confirmed_answers item must provide confirmed_value, normalized_values, or clear_value=true"
+            )
+        return self
+
+
 class FeishuBitableToFormOutput(BaseModel):
     success: bool = Field(description="Whether the conversion finished successfully.")
     bitable_url: str = Field(description="The source bitable URL that the agent operated on.")
@@ -201,6 +318,38 @@ class FeishuBitableToFormOutput(BaseModel):
         description="Visible draft questionnaire questions captured from the Feishu form editor for human review.",
     )
     notes: list[str] = Field(default_factory=list, description="Warnings, blockers, or follow-up notes.")
+
+
+class FeishuFormFillOutput(BaseModel):
+    success: bool = Field(description="Whether the form-fill flow finished successfully.")
+    form_url: str = Field(description="The Feishu questionnaire/form URL that the agent operated on.")
+    form_name: str | None = Field(default=None, description="Questionnaire title when visible.")
+    awaiting_human_confirmation: bool = Field(
+        default=False,
+        description="True when the agent has prepared draft answers and is waiting for a human to confirm before final submission.",
+    )
+    draft_answers: list[FeishuFormAnswerDraft] = Field(
+        default_factory=list,
+        description="Draft answers inferred from the user query for human review.",
+    )
+    submission_result: str | None = Field(
+        default=None,
+        description="Visible confirmation text after successful submission, when available.",
+    )
+    notes: list[str] = Field(default_factory=list, description="Warnings, blockers, or follow-up notes.")
+
+
+class FeishuFieldExtraction(BaseModel):
+    value: str | None = Field(default=None, description="Extracted field value.")
+    raw_value: str | None = Field(default=None, description="Shortest supporting span copied from the user query.")
+    confidence: Literal["high", "medium", "low"] | None = Field(default=None)
+
+
+class FeishuFormFillExtraction(BaseModel):
+    name: FeishuFieldExtraction = Field(default_factory=FeishuFieldExtraction)
+    attendance_time: FeishuFieldExtraction = Field(default_factory=FeishuFieldExtraction)
+    attendance_count: FeishuFieldExtraction = Field(default_factory=FeishuFieldExtraction)
+    notes: list[str] = Field(default_factory=list)
 
 
 class BrowserAgentRunResponse(BaseModel):
@@ -220,6 +369,8 @@ class BrowserAgentRunResponse(BaseModel):
         description="Unix epoch seconds when the draft_session_id expires. Null when no session was issued.",
     )
     draft_questions: list[FeishuQuestionDraft] = Field(default_factory=list)
+    draft_answers: list[FeishuFormAnswerDraft] = Field(default_factory=list)
+    submission_result: str | None = Field(default=None, description="Visible submission success message or receipt text when available.")
     current_url: str | None = None
     visited_urls: list[str] = Field(default_factory=list)
     steps: int = 0
@@ -289,3 +440,34 @@ class RuntimeConfigSnapshot(BaseModel):
     initialized_at: str | None
     initialized_keys: list[str] = Field(default_factory=list)
     runtime_config: dict[str, Any] = Field(default_factory=dict)
+
+
+class FeishuFormFillPrepareRequest(BaseModel):
+    query: str = Field(description="Natural-language source text that should be parsed into the form fields.")
+    llm: LLMOverride | None = None
+
+
+class FeishuFormFillSubmitRequest(BaseModel):
+    draft_session_id: str = Field(description="The draft_session_id returned by the draft phase.")
+    human_confirmation_notes: str | None = Field(
+        default=None,
+        description="Optional non-data notes for the submit step. If the user provides new data, re-run the prepare phase instead of using this field.",
+    )
+    confirmed_answers: list[FeishuFormAnswerOverride] = Field(default_factory=list)
+    field_ids: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Optional Feishu form field id mapping for non-preset or rebuilt forms. "
+            "Keys: name, attendance_time, attendance_count. Omit to use the built-in preset form mapping."
+        ),
+    )
+    allowed_domains: list[str] = Field(default_factory=list)
+    headless: bool | None = None
+    max_steps: int = Field(default=35, ge=1, le=120)
+    timeout_sec: int = Field(default=900, ge=30, le=3600)
+    use_vision: Literal["auto", "always", "never"] = Field(default="auto")
+    llm: LLMOverride | None = None
+    auth: BrowserAuthConfig | None = None
+
+
+BrowserAgentRunRequest.model_rebuild()

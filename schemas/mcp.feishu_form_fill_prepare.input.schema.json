@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "feishu_form_fill_prepare",
+  "description": "Phase 1 of filling the built-in preset Feishu questionnaire from natural language. Parses `query` into the fixed fields 姓名 / 参会时间 / 参会人数, normalizes the meeting time into a human-readable value, and stops before final submission for human review.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["query"],
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "Natural-language source text to parse into questionnaire answers.",
+      "examples": [
+        "帮我填写这份报名问卷：我叫张三，手机号 13800138000，公司是 OpenAI，岗位是产品经理，下周三下午可以参加。"
+      ]
+    },
+    "llm": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "base_url": { "type": "string" },
+        "api_key": { "type": "string" },
+        "model": { "type": "string" },
+        "temperature": { "type": "number", "minimum": 0, "maximum": 2 }
+      }
+    }
+  }
+}
