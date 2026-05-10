@@ -46,7 +46,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def _mcp_enabled() -> bool:
-    return os.getenv("ENABLE_MCP", "").strip().lower() in {"1", "true", "yes", "on"}
+    raw = os.getenv("ENABLE_MCP")
+    if raw is None or raw.strip() == "":
+        return True
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _mcp_port() -> int:

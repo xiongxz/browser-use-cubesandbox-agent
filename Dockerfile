@@ -29,6 +29,28 @@ COPY schemas /app/schemas
 COPY .env.example /app/.env.example
 COPY agent.build.yaml /app/agent.build.yaml
 
+# CubeSandbox template settings for the final pushed app image:
+# - Build/push this image as linux/amd64, for example:
+#   docker buildx build --platform linux/amd64 -t <registry>/browser-use-cubesandbox-agent:latest --push .
+# - Template image: use the final app image above, preferably as image@sha256:...
+# - Writable layer size: 2G
+# - Expose ports:
+#   49983 = envd control plane, required by CubeSandbox
+#   49999 = FastAPI app API (/healthz, /v1/init, /v1/agent/run, /v1/agent/stream)
+#   60000 = MCP streamable HTTP server, enabled by default
+# - Readiness probe: HTTP on port 49983, path /health, startup timeout about 120s
+# - Optional template env: set ENABLE_MCP=false only when MCP should be disabled
+# - Avoid baking LLM_API_KEY into shared templates; inject it after sandbox startup via POST /v1/init.
+#
+# Equivalent cubemastercli shape:
+#   cubemastercli tpl create-from-image \
+#     --image <registry>/browser-use-cubesandbox-agent:latest \
+#     --writable-layer-size 2G \
+#     --expose-port 49983 \
+#     --expose-port 49999 \
+#     --expose-port 60000 \
+#     --probe 49983 \
+#     --probe-path /health
 RUN pip install --no-cache-dir . \
     && python -m playwright install --with-deps chromium \
     && rm -rf /root/.cache/pip

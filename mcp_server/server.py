@@ -7,8 +7,8 @@ FastAPI service stays the single source of agent behaviour.
 
 Run modes:
 
-- Mounted into the FastAPI app at ``/mcp`` (same port, default behaviour when
-  ``ENABLE_MCP=true``). See ``app/main.py``.
+- Started by the FastAPI app on the dedicated MCP port by default. Set
+  ``ENABLE_MCP=false`` to disable it. See ``app/main.py``.
 - Standalone via ``python -m mcp_server.server`` for stdio (Claude Desktop /
   IDE clients) or ``--transport streamable-http`` to host on its own port.
 """

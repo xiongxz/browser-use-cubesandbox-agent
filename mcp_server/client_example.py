@@ -41,7 +41,7 @@ Case file shape:
     }
 
 Server URL defaults to ``http://127.0.0.1:60000/mcp`` (the dedicated MCP port
-when running the FastAPI app with ``ENABLE_MCP=true``). Override with
+started by the FastAPI app unless ``ENABLE_MCP=false``). Override with
 ``--url`` or ``MCP_URL=...``.
 """
 

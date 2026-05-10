@@ -509,7 +509,7 @@ docker push your-registry.example.com/browser-use-cubesandbox-agent:latest
 
 - `49983` 是 `envd` 控制面端口，不要给业务服务占用。
 - 业务 HTTP 服务监听 `49999`。
-- `ENABLE_MCP=true` 时还会在 `60000` 起一个 MCP streamable-HTTP server（详见 §9）。即便不启用 MCP，把 60000 一起 expose 也无副作用。
+- 默认会在 `60000` 起一个 MCP streamable-HTTP server（详见 §9）。只有显式设置 `ENABLE_MCP=false` / `0` / `no` / `off` 时才关闭；即便关闭 MCP，把 60000 一起 expose 也无副作用。
 - 模板探针应使用 `49983/health`，这是 CubeSandbox 官方文档要求的 `envd` 探针。
 
 ```bash
@@ -591,12 +591,12 @@ feishu_bitable_draft_form(query)
 ### 启用方式
 
 ```bash
-ENABLE_MCP=true ./scripts/run_local.sh
+./scripts/run_local.sh
 # 或
-ENABLE_MCP=true uvicorn app.main:app --host 0.0.0.0 --port 49999
+uvicorn app.main:app --host 0.0.0.0 --port 49999
 ```
 
-启用后 FastAPI 会**额外起一个线程**跑 MCP server，默认监听 `0.0.0.0:60000/mcp`（与业务 HTTP 49999 分开）。`GET /` 自检接口会回显 `"mcp_enabled": true` 和 `ports.mcp` 端口号。
+FastAPI 默认会**额外起一个线程**跑 MCP server，监听 `0.0.0.0:60000/mcp`（与业务 HTTP 49999 分开）。`GET /` 自检接口会回显 `"mcp_enabled": true` 和 `ports.mcp` 端口号。只有显式设置 `ENABLE_MCP=false` / `0` / `no` / `off` 时才关闭 MCP。
 
 CubeSandbox 模板要把 60000 一起 expose（[Dockerfile](Dockerfile) / [agent.build.yaml](agent.build.yaml) 已经配好）：
 
@@ -636,7 +636,7 @@ MCP_HOST=0.0.0.0 MCP_PORT=60000 \
 **1. 仅 list_tools（最快，几秒返回，不动浏览器、不烧 LLM token）**
 
 ```bash
-ENABLE_MCP=true ./scripts/run_local.sh &
+./scripts/run_local.sh &
 ./.venv/bin/python -m mcp_server.client_example
 # 期望:
 #   PASS MCP session initialized (server=browser-use-cubesandbox-agent ...)
