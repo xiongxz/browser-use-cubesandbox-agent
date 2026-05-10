@@ -22,12 +22,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl git \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml README.md /app/
-COPY app /app/app
-COPY mcp_server /app/mcp_server
-COPY schemas /app/schemas
-COPY .env.example /app/.env.example
-COPY agent.build.yaml /app/agent.build.yaml
+COPY pyproject.toml /app/
 
 # CubeSandbox template settings for the final pushed app image:
 # - Build/push this image as linux/amd64, for example:
@@ -51,9 +46,24 @@ COPY agent.build.yaml /app/agent.build.yaml
 #     --expose-port 60000 \
 #     --probe 49983 \
 #     --probe-path /health
-RUN pip install --no-cache-dir . \
+#
+# Cache layout:
+# - The expensive dependency/build-backend + Chromium layer below depends only on
+#   pyproject.toml. Normal app or README changes should not rerun it.
+# - After copying app code, install this project with --no-deps so only the
+#   lightweight local package layer is rebuilt.
+RUN python -c 'import subprocess, sys, tomllib; data = tomllib.load(open("pyproject.toml", "rb")); deps = [*data.get("build-system", {}).get("requires", []), *data["project"]["dependencies"]]; subprocess.check_call([sys.executable, "-m", "pip", "install", "--no-cache-dir", *deps])' \
     && python -m playwright install --with-deps chromium \
     && rm -rf /root/.cache/pip
+
+COPY README.md /app/README.md
+COPY app /app/app
+COPY mcp_server /app/mcp_server
+COPY schemas /app/schemas
+COPY .env.example /app/.env.example
+COPY agent.build.yaml /app/agent.build.yaml
+
+RUN pip install --no-cache-dir --no-build-isolation --no-deps .
 
 EXPOSE 49983 49999 60000
 
