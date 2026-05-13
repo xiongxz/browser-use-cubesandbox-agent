@@ -102,44 +102,42 @@ curl -sS -X POST "$HTTP_BASE/v1/feishu/form-fill/prepare" \
   "awaiting_human_confirmation": true,
   "draft_session_id": "8da6a3c7-a79f-41c3-b381-885310a6db8c",
   "draft_session_expires_at": 1778475009.8038566,
-  "draft_answers": [
-    {
-      "index": 1,
-      "field_key": "name",
-      "field_label": "姓名",
-      "question_type": "string",
-      "required": true,
-      "proposed_value": "张三",
-      "raw_value": "张三",
-      "normalized_values": ["张三"],
-      "confidence": "high",
-      "source_excerpt": "张三"
-    },
-    {
-      "index": 2,
-      "field_key": "attendance_time",
-      "field_label": "参会时间",
-      "question_type": "timestamp_ms",
-      "required": true,
-      "proposed_value": "2026-05-08",
-      "raw_value": "5月8号",
-      "normalized_values": ["1778169600000"],
-      "confidence": "high",
-      "source_excerpt": "5月8号"
-    },
-    {
-      "index": 3,
-      "field_key": "attendance_count",
-      "field_label": "参会人数",
-      "question_type": "number",
-      "required": true,
-      "proposed_value": "3",
-      "raw_value": "3个人",
-      "normalized_values": ["3"],
-      "confidence": "high",
-      "source_excerpt": "3个人"
-    }
-  ],
+  "payload": {
+    "version": "goclaw.gateway.reply.v1",
+    "kind": "ask_user",
+    "title": "参会登记问卷信息确认",
+    "text": "请确认以下信息是否提交。",
+    "summary": [
+      { "id": "name", "label": "姓名", "value": "张三" },
+      { "id": "attendance_time", "label": "参会时间", "value": "2026-05-08" },
+      { "id": "attendance_count", "label": "参会人数", "value": "3" }
+    ],
+    "questions": [
+      {
+        "header": "提交确认",
+        "question": "这些信息是否正确？",
+        "multiSelect": false,
+        "options": [
+          {
+            "id": "confirm",
+            "label": "确认提交",
+            "description": "继续填写并提交表单"
+          },
+          {
+            "id": "edit",
+            "label": "我要修改",
+            "description": "补充或更正信息后再确认"
+          },
+          {
+            "id": "cancel",
+            "label": "取消",
+            "description": "停止本次操作"
+          }
+        ]
+      }
+    ],
+    "fields": []
+  },
   "errors": [],
   "notes": []
 }
@@ -148,15 +146,18 @@ curl -sS -X POST "$HTTP_BASE/v1/feishu/form-fill/prepare" \
 注意：
 
 - 阶段 1 会停在人工确认点，所以 `success: false` 不等于失败。判断是否正常进入确认态应看 `awaiting_human_confirmation: true`、`draft_session_id` 非空、`errors` 为空。
+- `payload` 是给前端或 gateway 渲染确认 UI 的结构化载荷。`draft_session_id`、`awaiting_human_confirmation`、`draft_session_expires_at` 等执行状态仍保留在响应最外层，避免污染 UI 协议。
+- 接入方应渲染 `payload`，不要依赖内部草稿结构。原始草稿会保留在服务内部用于阶段 2 校验和合并人工修正。
 - `draft_session_id` 是阶段 2 的绑定 token，默认 TTL 是 1800 秒，且提交后会被消费。
 - 如果用户在确认阶段补充了新的自然语言信息，例如“再加一句其实是 4 个人”，不要直接 submit。应把补充后的完整文本重新调用 prepare，生成新的 draft。
 
 ### 人工确认或修正
 
-调用方应把 `draft_answers` 展示给用户确认。用户可以：
+调用方应把 `payload` 展示给用户确认。用户可以：
 
 - 直接确认：阶段 2 只传 `draft_session_id`。
 - 修正字段：阶段 2 传 `confirmed_answers` 覆盖某些字段。
+- 取消：不调用阶段 2。
 
 `confirmed_answers` 每个元素至少需要一个定位字段：`index`、`field_key`、`field_label` 三选一；同时需要提供 `confirmed_value`、`normalized_values` 或 `clear_value: true` 之一。
 
@@ -347,7 +348,7 @@ MCP prepare 的 `arguments` schema：
 - `awaiting_human_confirmation`
 - `draft_session_id`
 - `draft_session_expires_at`
-- `draft_answers`
+- `payload`
 - `errors`
 
 ### MCP 阶段 2：submit
@@ -438,7 +439,7 @@ if prepare_response.awaiting_human_confirmation != true:
     show_error(prepare_response.errors)
     stop
 
-show draft_answers to human
+show payload to human
 
 if human provides new facts in natural language:
     prepare again with updated full text
@@ -470,5 +471,5 @@ else:
 - 阶段 2 必须使用阶段 1 返回的同一个 `draft_session_id`。
 - `draft_session_id` 是一次性的，提交成功或失败后都可能被消费。
 - 用户有新的业务信息时，应重新跑阶段 1，而不是把新信息塞进 `human_confirmation_notes`。
-- 接入方应该展示 `draft_answers` 给用户确认，避免直接把解析结果提交到真实表单。
+- 接入方应该展示 `payload` 给用户确认，避免直接把解析结果提交到真实表单。
 - 当前预置问卷字段是固定三字段；如果表单字段 ID 被重建，可以通过 submit 的 `field_ids` 覆盖。

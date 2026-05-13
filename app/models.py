@@ -352,6 +352,44 @@ class FeishuFormFillExtraction(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class GatewayReplySummaryItem(BaseModel):
+    id: str | None = Field(default=None, description="Optional machine-readable item id.")
+    label: str = Field(description="Human-readable label.")
+    value: Any = Field(default=None, description="Display value.")
+
+
+class GatewayReplyOption(BaseModel):
+    id: str = Field(description="Machine-readable option id.")
+    label: str = Field(description="Human-readable option label.")
+    description: str | None = Field(default=None, description="Short explanation of what this option does.")
+    preview: str | None = Field(default=None, description="Optional preview text for rich cards.")
+
+
+class GatewayReplyQuestion(BaseModel):
+    header: str = Field(description="Short section header for this question.")
+    question: str = Field(description="Question text shown to the user.")
+    options: list[GatewayReplyOption] = Field(default_factory=list)
+    multiSelect: bool = Field(default=False, description="Whether multiple options can be selected.")
+
+
+class GatewayReplyField(BaseModel):
+    id: str = Field(description="Machine-readable field id.")
+    label: str = Field(description="Human-readable field label.")
+    type: str = Field(default="text", description="Input type hint, for example text, number, date.")
+    required: bool = False
+    placeholder: str | None = None
+
+
+class GatewayReplyPayload(BaseModel):
+    version: str = Field(default="goclaw.gateway.reply.v1")
+    kind: Literal["text", "ask_user", "result", "error"] = Field(default="text")
+    title: str | None = None
+    text: str
+    summary: list[GatewayReplySummaryItem] = Field(default_factory=list)
+    questions: list[GatewayReplyQuestion] = Field(default_factory=list)
+    fields: list[GatewayReplyField] = Field(default_factory=list)
+
+
 class BrowserAgentRunResponse(BaseModel):
     run_id: str
     success: bool
@@ -379,6 +417,10 @@ class BrowserAgentRunResponse(BaseModel):
     errors: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     structured_output: dict[str, Any] | None = None
+    payload: GatewayReplyPayload | None = Field(
+        default=None,
+        description="Gateway/UI rendering payload. Existing orchestration fields remain at the response top level.",
+    )
     history_excerpt: list[str] = Field(default_factory=list)
 
 

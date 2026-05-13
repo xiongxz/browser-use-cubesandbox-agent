@@ -204,22 +204,13 @@ def _summarize_result(tool: str, payload: dict[str, Any]) -> bool:
             expires = payload.get("draft_session_expires_at")
             if expires:
                 _print_info(f"expires_at:       {expires}")
-        draft_items = payload.get("draft_questions") or payload.get("draft_answers") or []
-        for q in draft_items[:5]:
-            idx = q.get("index")
-            title = q.get("title") or q.get("field_label")
-            qtype = q.get("question_type")
-            required = q.get("required")
-            extras = []
-            if qtype:
-                extras.append(qtype)
-            if required is not None:
-                extras.append("required" if required else "optional")
-            tag = f" [{', '.join(extras)}]" if extras else ""
-            answer = q.get("proposed_value")
-            suffix = f" -> {answer}" if answer else ""
-            _print_info(f"  Q{idx}: {title}{tag}{suffix}")
-        if (more := len(draft_items)) > 5:
+        summary_items = (payload.get("payload") or {}).get("summary") or []
+        for item in summary_items[:5]:
+            label = item.get("label")
+            value = item.get("value")
+            suffix = f" -> {value}" if value is not None else ""
+            _print_info(f"  {label}{suffix}")
+        if (more := len(summary_items)) > 5:
             _print_info(f"  ... and {more - 5} more")
         if sid:
             print()

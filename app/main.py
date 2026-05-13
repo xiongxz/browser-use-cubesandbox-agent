@@ -100,6 +100,13 @@ app = FastAPI(
 )
 
 
+PUBLIC_RUN_RESPONSE_EXCLUDE = {
+    "draft_questions",
+    "draft_answers",
+    "structured_output",
+}
+
+
 def _is_writable(path: Path) -> bool:
     try:
         path.mkdir(parents=True, exist_ok=True)
@@ -277,13 +284,21 @@ async def get_auth_profile(profile_id: str) -> AuthProfileSummary:
     return record.to_summary()
 
 
-@app.post("/v1/agent/run", response_model=BrowserAgentRunResponse)
+@app.post(
+    "/v1/agent/run",
+    response_model=BrowserAgentRunResponse,
+    response_model_exclude=PUBLIC_RUN_RESPONSE_EXCLUDE,
+)
 async def run_agent(request: BrowserAgentRunRequest) -> BrowserAgentRunResponse:
     collector = EventCollector(run_id=make_run_id())
     return await execute_run(request, runtime_config.settings, collector, draft_store)
 
 
-@app.post("/v1/feishu/form-fill/prepare", response_model=BrowserAgentRunResponse)
+@app.post(
+    "/v1/feishu/form-fill/prepare",
+    response_model=BrowserAgentRunResponse,
+    response_model_exclude=PUBLIC_RUN_RESPONSE_EXCLUDE,
+)
 async def prepare_feishu_form_fill(request: FeishuFormFillPrepareRequest) -> BrowserAgentRunResponse:
     collector = EventCollector(run_id=make_run_id())
     run_request = BrowserAgentRunRequest(
@@ -297,7 +312,11 @@ async def prepare_feishu_form_fill(request: FeishuFormFillPrepareRequest) -> Bro
     return await execute_run(run_request, runtime_config.settings, collector, draft_store)
 
 
-@app.post("/v1/feishu/form-fill/submit", response_model=BrowserAgentRunResponse)
+@app.post(
+    "/v1/feishu/form-fill/submit",
+    response_model=BrowserAgentRunResponse,
+    response_model_exclude=PUBLIC_RUN_RESPONSE_EXCLUDE,
+)
 async def submit_feishu_form_fill(request: FeishuFormFillSubmitRequest) -> BrowserAgentRunResponse:
     collector = EventCollector(run_id=make_run_id())
     run_request = BrowserAgentRunRequest(

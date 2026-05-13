@@ -35,7 +35,7 @@ _MCP_INSTRUCTIONS = (
     "1. Call `feishu_form_fill_prepare` FIRST - it uses the built-in preset form definition, "
     "parses the natural-language query into the three required fields (姓名, 参会时间, 参会人数), "
     "normalizes the meeting time into a human-readable value, and stops for human review. "
-    "The response includes `draft_session_id`, `draft_session_expires_at`, and `draft_answers`.\n"
+    "The response includes `draft_session_id`, `draft_session_expires_at`, and a `payload` UI object for review.\n"
     "2. AFTER a human reviews and approves or edits those answers, call `feishu_form_fill_submit` "
     "with the `draft_session_id` from phase 1 plus any `confirmed_answers` overrides. "
     "The agent will reopen the same form, fill the confirmed answers, submit it, and return the submission result.\n"
@@ -146,7 +146,7 @@ def build_server(*, streamable_http_path: str | None = None) -> FastMCP:
         description=(
             "Phase 1 of filling the built-in preset Feishu questionnaire from natural language. "
             "Parses `query` into the fixed fields 姓名 / 参会时间 / 参会人数, normalizes the meeting time into a human-readable value, "
-            "and stops before submission for human review. Returns `draft_answers`, "
+            "and stops before submission for human review. Returns `payload`, "
             "`draft_session_id`, and `draft_session_expires_at`."
         ),
     )

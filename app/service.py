@@ -22,11 +22,17 @@ from .feishu_form_fill import PRESET_FEISHU_FORM_FIELD_IDS, display_time_to_time
 from .models import (
     BrowserAgentRunRequest,
     BrowserAgentRunResponse,
+    FeishuFormAnswerDraft,
     FeishuFormFillExtraction,
     FeishuFormAnswerOverride,
     FeishuFormFillOutput,
     FeishuBitableToFormOutput,
     GenericBrowserTaskOutput,
+    GatewayReplyField,
+    GatewayReplyOption,
+    GatewayReplyPayload,
+    GatewayReplyQuestion,
+    GatewayReplySummaryItem,
     PRESET_FEISHU_FORM_URL,
     StreamEvent,
 )
@@ -110,6 +116,115 @@ def _merge_confirmed_answers(
         if item.index is None and label
     ]
     return ordered + sorted(extras, key=lambda item: item.field_label or "")
+
+
+def _question_type_to_field_type(question_type: str | None) -> str:
+    if question_type in {"number", "integer"}:
+        return "number"
+    if question_type in {"date", "datetime", "timestamp_ms"}:
+        return "date"
+    return "text"
+
+
+def _build_confirmation_question(*, confirm_label: str, confirm_description: str) -> GatewayReplyQuestion:
+    return GatewayReplyQuestion(
+        header="提交确认",
+        question="这些信息是否正确？",
+        multiSelect=False,
+        options=[
+            GatewayReplyOption(
+                id="confirm",
+                label=confirm_label,
+                description=confirm_description,
+            ),
+            GatewayReplyOption(
+                id="edit",
+                label="我要修改",
+                description="补充或更正信息后再确认",
+            ),
+            GatewayReplyOption(
+                id="cancel",
+                label="取消",
+                description="停止本次操作",
+            ),
+        ],
+    )
+
+
+def _build_form_fill_ask_user_payload(
+    *,
+    form_name: str | None,
+    draft_answers: list[FeishuFormAnswerDraft],
+) -> GatewayReplyPayload:
+    missing = [answer for answer in draft_answers if answer.required and not answer.proposed_value]
+    summary = [
+        GatewayReplySummaryItem(
+            id=answer.field_key,
+            label=answer.field_label,
+            value=answer.proposed_value,
+        )
+        for answer in draft_answers
+    ]
+    fields = [
+        GatewayReplyField(
+            id=answer.field_key,
+            label=answer.field_label,
+            type=_question_type_to_field_type(answer.question_type),
+            required=bool(answer.required),
+            placeholder=f"请输入{answer.field_label}",
+        )
+        for answer in missing
+    ]
+    return GatewayReplyPayload(
+        kind="ask_user",
+        title=f"{form_name or '表单'}信息确认",
+        text="请补充缺失字段，并确认以下信息是否提交。" if missing else "请确认以下信息是否提交。",
+        summary=summary,
+        fields=fields,
+        questions=[
+            _build_confirmation_question(
+                confirm_label="确认提交",
+                confirm_description="继续填写并提交表单",
+            )
+        ],
+    )
+
+
+def _build_bitable_ask_user_payload(*, form_name: str | None, draft_questions: list[Any]) -> GatewayReplyPayload:
+    summary = [
+        GatewayReplySummaryItem(
+            id=str(question.index),
+            label=f"题目 {question.index}",
+            value=question.title,
+        )
+        for question in draft_questions
+    ]
+    return GatewayReplyPayload(
+        kind="ask_user",
+        title=f"{form_name or '问卷'}草稿确认",
+        text="请确认以下问卷草稿是否可以发布。",
+        summary=summary,
+        questions=[
+            _build_confirmation_question(
+                confirm_label="确认发布",
+                confirm_description="继续开启表单分享并返回问卷链接",
+            )
+        ],
+    )
+
+
+def _build_result_payload(
+    *,
+    title: str | None,
+    text: str,
+    summary: list[GatewayReplySummaryItem] | None = None,
+) -> GatewayReplyPayload:
+    return GatewayReplyPayload(
+        kind="result",
+        title=title,
+        text=text,
+        summary=summary or [],
+    )
 
 
 def _confirmed_answer_by_key(
@@ -437,16 +552,17 @@ def _build_response(
 
     if isinstance(structured, FeishuBitableToFormOutput):
         is_waiting = structured.awaiting_human_confirmation
+        final_text = (
+            structured.form_url
+            or ("Awaiting human confirmation for the draft questionnaire." if is_waiting else None)
+            or "; ".join(structured.notes)
+            or history.final_result()
+        )
         return BrowserAgentRunResponse(
             run_id=run_id,
             success=structured.success and bool(structured.form_url) and not is_waiting,
             mode=request.mode,
-            final_text=(
-                structured.form_url
-                or ("Awaiting human confirmation for the draft questionnaire." if is_waiting else None)
-                or "; ".join(structured.notes)
-                or history.final_result()
-            ),
+            final_text=final_text,
             form_url=structured.form_url,
             form_name=structured.form_name,
             awaiting_human_confirmation=is_waiting,
@@ -459,21 +575,38 @@ def _build_response(
             errors=errors,
             notes=structured.notes,
             structured_output=structured.model_dump(),
+            payload=(
+                _build_bitable_ask_user_payload(
+                    form_name=structured.form_name,
+                    draft_questions=structured.draft_questions,
+                )
+                if is_waiting
+                else _build_result_payload(
+                    title=f"{structured.form_name or '问卷'}发布结果",
+                    text=final_text or "任务已完成。",
+                    summary=[
+                        GatewayReplySummaryItem(label="问卷链接", value=structured.form_url),
+                    ]
+                    if structured.form_url
+                    else [],
+                )
+            ),
             history_excerpt=history_excerpt,
         )
 
     if isinstance(structured, FeishuFormFillOutput):
         is_waiting = structured.awaiting_human_confirmation
+        final_text = (
+            ("Awaiting human confirmation for the drafted form answers." if is_waiting else None)
+            or structured.submission_result
+            or "; ".join(structured.notes)
+            or history.final_result()
+        )
         return BrowserAgentRunResponse(
             run_id=run_id,
             success=structured.success and not is_waiting,
             mode=request.mode,
-            final_text=(
-                ("Awaiting human confirmation for the drafted form answers." if is_waiting else None)
-                or structured.submission_result
-                or "; ".join(structured.notes)
-                or history.final_result()
-            ),
+            final_text=final_text,
             form_url=structured.form_url,
             form_name=structured.form_name,
             awaiting_human_confirmation=is_waiting,
@@ -487,6 +620,21 @@ def _build_response(
             errors=errors,
             notes=structured.notes,
             structured_output=structured.model_dump(),
+            payload=(
+                _build_form_fill_ask_user_payload(
+                    form_name=structured.form_name,
+                    draft_answers=structured.draft_answers,
+                )
+                if is_waiting
+                else _build_result_payload(
+                    title=f"{structured.form_name or '表单'}提交结果",
+                    text=final_text or "表单已提交。",
+                    summary=[
+                        GatewayReplySummaryItem(label="表单链接", value=structured.form_url),
+                        GatewayReplySummaryItem(label="提交结果", value=structured.submission_result),
+                    ],
+                )
+            ),
             history_excerpt=history_excerpt,
         )
 
@@ -642,6 +790,10 @@ async def execute_run(
                     submission_result=None,
                     notes=notes,
                 ).model_dump(),
+                payload=_build_form_fill_ask_user_payload(
+                    form_name=form_name,
+                    draft_answers=draft_answers,
+                ),
                 history_excerpt=[],
             )
             session = await draft_store.create(
@@ -664,6 +816,7 @@ async def execute_run(
                     "awaiting_human_confirmation": response.awaiting_human_confirmation,
                     "draft_session_id": response.draft_session_id,
                     "draft_session_expires_at": response.draft_session_expires_at,
+                    "payload": response.payload.model_dump() if response.payload else None,
                     "steps": response.steps,
                     "duration_sec": response.duration_sec,
                 },
@@ -815,6 +968,7 @@ async def execute_run(
                 "draft_session_expires_at": response.draft_session_expires_at,
                 "submission_result": response.submission_result,
                 "current_url": response.current_url,
+                "payload": response.payload.model_dump() if response.payload else None,
                 "steps": response.steps,
                 "duration_sec": response.duration_sec,
             },
