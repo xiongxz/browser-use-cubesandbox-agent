@@ -476,6 +476,7 @@ class RuntimeConfigUpdateRequest(BaseModel):
     browser_headless: bool | None = Field(default=None)
     browser_window_width: int | None = Field(default=None, ge=320, le=4096)
     browser_window_height: int | None = Field(default=None, ge=320, le=4096)
+    browser_start_timeout_sec: float | None = Field(default=None, ge=1.0, le=600.0)
     feishu_default_profile_id: str | None = Field(default=None)
 
     @model_validator(mode="before")
@@ -501,6 +502,7 @@ class RuntimeConfigUpdateRequest(BaseModel):
             "BROWSER_HEADLESS": "browser_headless",
             "BROWSER_WINDOW_WIDTH": "browser_window_width",
             "BROWSER_WINDOW_HEIGHT": "browser_window_height",
+            "BROWSER_START_TIMEOUT_SEC": "browser_start_timeout_sec",
             "FEISHU_DEFAULT_PROFILE_ID": "feishu_default_profile_id",
         }
 
@@ -512,6 +514,7 @@ class RuntimeConfigUpdateRequest(BaseModel):
             "browser_headless",
             "browser_window_width",
             "browser_window_height",
+            "browser_start_timeout_sec",
             "feishu_default_profile_id",
         }
         for key in canonical_keys:

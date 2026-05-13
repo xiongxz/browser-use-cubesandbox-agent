@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -40,6 +41,35 @@ from .prompts import build_task_prompt, effective_allowed_domains
 
 
 logger = logging.getLogger(__name__)
+
+
+def _configure_browser_use_start_timeout(settings: Settings) -> None:
+    timeout = max(float(settings.browser_start_timeout_sec), 1.0)
+    timeout_text = str(timeout)
+
+    # browser-use reads these when BrowserStartEvent / BrowserLaunchEvent are
+    # instantiated. Keep both in sync so the outer lifecycle event and the
+    # nested local launch event share the same budget.
+    os.environ["TIMEOUT_BrowserStartEvent"] = timeout_text
+    os.environ["TIMEOUT_BrowserLaunchEvent"] = timeout_text
+
+    # LocalBrowserWatchdog._wait_for_cdp_url has its own default timeout=30,
+    # and BrowserLaunchEvent calls it without passing a timeout. Patch the
+    # default through our app layer instead of modifying site-packages.
+    from browser_use.browser.watchdogs.local_browser_watchdog import LocalBrowserWatchdog
+
+    original_attr = "_goclaw_original_wait_for_cdp_url"
+    if hasattr(LocalBrowserWatchdog, original_attr):
+        return
+
+    original_wait_for_cdp_url = LocalBrowserWatchdog._wait_for_cdp_url
+    setattr(LocalBrowserWatchdog, original_attr, original_wait_for_cdp_url)
+
+    async def wait_for_cdp_url_with_configured_timeout(port: int, timeout: float | None = None) -> str:
+        effective_timeout = timeout if timeout is not None else float(os.environ["TIMEOUT_BrowserLaunchEvent"])
+        return await original_wait_for_cdp_url(port, timeout=effective_timeout)
+
+    LocalBrowserWatchdog._wait_for_cdp_url = staticmethod(wait_for_cdp_url_with_configured_timeout)
 
 
 def _utc_now() -> str:
@@ -496,6 +526,8 @@ def _build_browser(
     run_dir: Path,
     auth_store: AuthStore,
 ) -> Browser:
+    _configure_browser_use_start_timeout(settings)
+
     auth = request.auth
     storage_state: str | dict[str, Any] | None = None
 

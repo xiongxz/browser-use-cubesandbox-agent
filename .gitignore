@@ -23,6 +23,7 @@ dist/
 # --- Local runtime artifacts ---
 artifacts/
 tmp/
+pet-runs/
 
 # --- Sensitive auth payloads (defensive — even outside tmp/) ---
 *.storage_state.json

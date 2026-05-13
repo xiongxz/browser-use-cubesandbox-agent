@@ -35,6 +35,7 @@ ALLOWED_KEYS: frozenset[str] = frozenset(
         "browser_headless",
         "browser_window_width",
         "browser_window_height",
+        "browser_start_timeout_sec",
         "feishu_default_profile_id",
     }
 )
@@ -111,6 +112,7 @@ class RuntimeConfigStore:
             "browser_headless": s.browser_headless,
             "browser_window_width": s.browser_window_width,
             "browser_window_height": s.browser_window_height,
+            "browser_start_timeout_sec": s.browser_start_timeout_sec,
             "feishu_default_profile_id": s.feishu_default_profile_id,
             "draft_session_ttl_sec": s.draft_session_ttl_sec,
             "browser_artifacts_dir": str(s.browser_artifacts_dir),

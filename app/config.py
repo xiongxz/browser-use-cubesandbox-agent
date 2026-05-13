@@ -44,6 +44,7 @@ class Settings:
     browser_headless: bool
     browser_window_width: int
     browser_window_height: int
+    browser_start_timeout_sec: float
     browser_artifacts_dir: Path
     auth_state_dir: Path
     feishu_default_profile_id: str
@@ -67,6 +68,7 @@ def load_settings() -> Settings:
         browser_headless=_get_bool("BROWSER_HEADLESS", True),
         browser_window_width=_get_int("BROWSER_WINDOW_WIDTH", 1440),
         browser_window_height=_get_int("BROWSER_WINDOW_HEIGHT", 900),
+        browser_start_timeout_sec=_get_float("BROWSER_START_TIMEOUT_SEC", 120.0),
         browser_artifacts_dir=artifacts_dir,
         auth_state_dir=auth_state_dir,
         feishu_default_profile_id=os.getenv("FEISHU_DEFAULT_PROFILE_ID", "feishu-default"),
