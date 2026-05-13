@@ -257,6 +257,33 @@ def _build_result_payload(
     )
 
 
+def _looks_like_form_submission_success(*values: str | None) -> bool:
+    text = " ".join(value.strip() for value in values if value and value.strip())
+    if not text:
+        return False
+    lowered = text.lower()
+    negative_markers = (
+        "not submitted",
+        "submit failed",
+        "submission failed",
+        "failed to submit",
+        "未提交",
+        "提交失败",
+        "无法提交",
+    )
+    if any(marker in lowered for marker in negative_markers):
+        return False
+    success_markers = (
+        "submitted",
+        "submission successful",
+        "submit success",
+        "提交成功",
+        "已提交",
+        "成功提交",
+    )
+    return any(marker in lowered for marker in success_markers)
+
+
 def _confirmed_answer_by_key(
     request: BrowserAgentRunRequest,
     field_key: str,
@@ -628,6 +655,11 @@ def _build_response(
 
     if isinstance(structured, FeishuFormFillOutput):
         is_waiting = structured.awaiting_human_confirmation
+        visible_submission_success = _looks_like_form_submission_success(
+            structured.submission_result,
+            history.final_result(),
+        )
+        success = not is_waiting and (structured.success or visible_submission_success)
         final_text = (
             ("Awaiting human confirmation for the drafted form answers." if is_waiting else None)
             or structured.submission_result
@@ -636,7 +668,7 @@ def _build_response(
         )
         return BrowserAgentRunResponse(
             run_id=run_id,
-            success=structured.success and not is_waiting,
+            success=success,
             mode=request.mode,
             final_text=final_text,
             form_url=structured.form_url,
