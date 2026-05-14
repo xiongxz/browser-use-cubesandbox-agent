@@ -1,9 +1,8 @@
-"""MCP server that exposes the local HTTP API as named tools.
+"""Optional MCP sidecar for discovering the HTTP SSE protocol.
 
-Mirrors ``schemas/mcp.tools.catalog.json`` — the tools have the same names,
-signatures, and bodyTemplate semantics. Internally each tool POSTs to the
-local FastAPI service over HTTP, so the MCP server is a thin adapter and the
-FastAPI service stays the single source of agent behaviour.
+The actual business flow is exposed as HTTP SSE. The MCP sidecar intentionally
+does not proxy browser runs; it only publishes the current protocol
+contract as a small helper tool.
 
 Run modes:
 
@@ -20,68 +19,16 @@ import logging
 import os
 from typing import Any
 
-import httpx
 from mcp.server.fastmcp import FastMCP
 
 
-logger = logging.getLogger(__name__)
-
-
 _MCP_INSTRUCTIONS = (
-    "This server wraps a Browser Use agent that drives a real Chromium browser. "
-    "Use `browser_agent_run` for arbitrary browser automation. "
-    "\n\n"
-    "For the Feishu prebuilt questionnaire fill flow, there are TWO phases:\n"
-    "1. Call `feishu_form_fill_prepare` FIRST - it uses the built-in preset form definition, "
-    "parses the natural-language query into the three required fields (姓名, 参会时间, 参会人数), "
-    "normalizes the meeting time into a human-readable value, and stops for human review. "
-    "The response includes `draft_session_id`, `draft_session_expires_at`, and a `payload` UI object for review.\n"
-    "2. AFTER a human reviews and approves or edits those answers, call `feishu_form_fill_submit` "
-    "with the `draft_session_id` from phase 1 plus any `confirmed_answers` overrides. "
-    "The agent will reopen the same form, fill the confirmed answers, submit it, and return the submission result.\n"
-    "IMPORTANT: if the user provides NEW supplemental information after phase 1, do NOT call submit yet. "
-    "Instead call `feishu_form_fill_prepare` again with the updated natural-language request so the parse-confirm flow runs again.\n"
-    "\n"
-    "For the Feishu bitable -> questionnaire flow, there are TWO phases:\n"
-    "1. Call `feishu_bitable_draft_form` FIRST - it opens the bitable, creates/opens "
-    "the form editor, captures draft questions, and stops for human review. "
-    "The response includes `draft_session_id` and `draft_session_expires_at`.\n"
-    "2. AFTER a human reviews and approves, call `feishu_bitable_publish_form` with "
-    "the `draft_session_id` from phase 1. The agent will find the existing form view, "
-    "click 'Share Form', enable sharing, and return the final questionnaire URL.\n"
-    "\n"
-    "IMPORTANT: `draft_session_id` is REQUIRED for phase 2 and must match exactly. "
-    "Do NOT call phase 2 before phase 1 completes successfully."
+    "This server accompanies the HTTP service. The public agent surface is the "
+    "Feishu form-fill segmented SSE protocol: POST /v1/feishu/form-fill/run "
+    "streams until the next ask_user_question or terminal event, and "
+    "POST /v1/feishu/form-fill/runs/{run_id}/input feeds human confirmation, "
+    "edits, supplements, or cancellation back into that run and returns the next stream segment."
 )
-
-
-def _proxy_base() -> str:
-    """HTTP base URL for the FastAPI service we delegate to. Defaults to the
-    loopback so that when MCP is mounted on the same port everything stays
-    in-process."""
-    base = os.getenv("MCP_PROXY_BASE")
-    if base:
-        return base.rstrip("/")
-    port = os.getenv("PORT", "49999")
-    return f"http://127.0.0.1:{port}"
-
-
-def _proxy_timeout() -> float:
-    return float(os.getenv("MCP_PROXY_TIMEOUT_SEC", "1200"))
-
-
-async def _post_json(path: str, body: dict[str, Any]) -> dict[str, Any]:
-    cleaned = {k: v for k, v in body.items() if v is not None}
-    base = _proxy_base()
-    timeout = _proxy_timeout()
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(f"{base}{path}", json=cleaned)
-        if response.status_code >= 400:
-            logger.warning(
-                "Proxied run returned %s: %s", response.status_code, response.text[:300]
-            )
-            response.raise_for_status()
-        return response.json()
 
 
 def build_server(*, streamable_http_path: str | None = None) -> FastMCP:
@@ -107,187 +54,37 @@ def build_server(*, streamable_http_path: str | None = None) -> FastMCP:
     )
 
     @server.tool(
-        name="browser_agent_run",
+        name="feishu_form_fill_sse_contract",
         description=(
-            "Run a general Browser Use task. Use for arbitrary browser automation "
-            "when no Feishu-specific flow applies. Returns the structured run "
-            "result including final_text, visited_urls, steps, and screenshots."
+            "Return the current HTTP SSE protocol contract for Feishu form fill. "
+            "Use the HTTP endpoints directly for the actual segmented run."
         ),
     )
-    async def browser_agent_run(
-        query: str,
-        start_url: str | None = None,
-        allowed_domains: list[str] | None = None,
-        headless: bool | None = None,
-        max_steps: int = 35,
-        timeout_sec: int = 600,
-        use_vision: str = "auto",
-        llm: dict[str, Any] | None = None,
-        auth: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        return await _post_json(
-            "/v1/agent/run",
-            {
-                "mode": "general",
-                "query": query,
-                "start_url": start_url,
-                "allowed_domains": allowed_domains or [],
-                "headless": headless,
-                "max_steps": max_steps,
-                "timeout_sec": timeout_sec,
-                "use_vision": use_vision,
-                "llm": llm,
-                "auth": auth,
-            }
-        )
-
-    @server.tool(
-        name="feishu_form_fill_prepare",
-        description=(
-            "Phase 1 of filling the built-in preset Feishu questionnaire from natural language. "
-            "Parses `query` into the fixed fields 姓名 / 参会时间 / 参会人数, normalizes the meeting time into a human-readable value, "
-            "and stops before submission for human review. Returns `payload`, "
-            "`draft_session_id`, and `draft_session_expires_at`."
-        ),
-    )
-    async def feishu_form_fill_prepare(
-        query: str,
-        llm: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        return await _post_json(
-            "/v1/feishu/form-fill/prepare",
-            {
-                "query": query,
-                "llm": llm,
-            }
-        )
-
-    @server.tool(
-        name="feishu_form_fill_submit",
-        description=(
-            "Phase 2 of filling the built-in preset Feishu questionnaire. ONLY call this AFTER "
-            "`feishu_form_fill_prepare` returned a draft and a human has approved or corrected it with no additional free-form supplement. "
-            "You MUST pass the exact `draft_session_id` from phase 1. Optional `confirmed_answers` "
-            "override the drafted answers before the agent fills and submits the form. If the user adds new data in natural language, rerun phase 1 instead."
-        ),
-    )
-    async def feishu_form_fill_submit(
-        draft_session_id: str,
-        human_confirmation_notes: str | None = None,
-        confirmed_answers: list[dict[str, Any]] | None = None,
-        field_ids: dict[str, str] | None = None,
-        allowed_domains: list[str] | None = None,
-        headless: bool | None = None,
-        max_steps: int = 35,
-        timeout_sec: int = 900,
-        use_vision: str = "auto",
-        llm: dict[str, Any] | None = None,
-        auth: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        return await _post_json(
-            "/v1/feishu/form-fill/submit",
-            {
-                "draft_session_id": draft_session_id,
-                "human_confirmation_notes": human_confirmation_notes,
-                "confirmed_answers": confirmed_answers or [],
-                "field_ids": field_ids or {},
-                "allowed_domains": allowed_domains or [],
-                "headless": headless,
-                "max_steps": max_steps,
-                "timeout_sec": timeout_sec,
-                "use_vision": use_vision,
-                "llm": llm,
-                "auth": auth,
-            }
-        )
-
-    @server.tool(
-        name="feishu_bitable_draft_form",
-        description=(
-            "Phase 1 of the Feishu bitable -> questionnaire flow. Opens the "
-            "bitable, switches into the built-in questionnaire/form editor, "
-            "captures the visible draft questions, and stops for human review. "
-            "Does NOT enable form sharing. The response carries `draft_session_id` "
-            "and `draft_session_expires_at`; pass `draft_session_id` back into "
-            "`feishu_bitable_publish_form` once a human has approved the draft. "
-            "Embed the bitable URL in `query` (server auto-extracts) or pass "
-            "`bitable_url` explicitly."
-        ),
-    )
-    async def feishu_bitable_draft_form(
-        query: str,
-        bitable_url: str | None = None,
-        allowed_domains: list[str] | None = None,
-        headless: bool | None = None,
-        max_steps: int = 35,
-        timeout_sec: int = 600,
-        use_vision: str = "auto",
-        llm: dict[str, Any] | None = None,
-        auth: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        return await _post_json(
-            "/v1/agent/run",
-            {
-                "mode": "feishu_bitable_to_form",
-                "query": query,
-                "bitable_url": bitable_url,
-                "allowed_domains": allowed_domains or [],
-                "headless": headless,
-                "max_steps": max_steps,
-                "timeout_sec": timeout_sec,
-                "use_vision": use_vision,
-                "llm": llm,
-                "auth": auth,
-                "require_human_confirmation": True,
-                "human_confirmation_granted": False,
-            }
-        )
-
-    @server.tool(
-        name="feishu_bitable_publish_form",
-        description=(
-            "Phase 2 of the Feishu bitable -> questionnaire flow. ONLY call AFTER: "
-            "(1) feishu_bitable_draft_form returned a draft, AND (2) a human has approved it. "
-            "You MUST pass the exact draft_session_id from phase 1's response. "
-            "The agent will: check if a form view exists (create it if needed by clicking 'Generate Form/生成表单'), "
-            "enter the form editor, apply any human_confirmation_notes edits, "
-            "click the 'Share Form/分享表单' button in the top-right, "
-            "enable the 'Enable form sharing/开启表单分享' switch, "
-            "wait ~2 seconds for the link to appear, and return the final shareable questionnaire URL in form_url."
-        ),
-    )
-    async def feishu_bitable_publish_form(
-        query: str,
-        draft_session_id: str,
-        bitable_url: str | None = None,
-        human_confirmation_notes: str | None = None,
-        allowed_domains: list[str] | None = None,
-        headless: bool | None = None,
-        max_steps: int = 35,
-        timeout_sec: int = 900,
-        use_vision: str = "auto",
-        llm: dict[str, Any] | None = None,
-        auth: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        return await _post_json(
-            "/v1/agent/run",
-            {
-                "mode": "feishu_bitable_to_form",
-                "query": query,
-                "bitable_url": bitable_url,
-                "draft_session_id": draft_session_id,
-                "human_confirmation_notes": human_confirmation_notes,
-                "allowed_domains": allowed_domains or [],
-                "headless": headless,
-                "max_steps": max_steps,
-                "timeout_sec": timeout_sec,
-                "use_vision": use_vision,
-                "llm": llm,
-                "auth": auth,
-                "require_human_confirmation": True,
-                "human_confirmation_granted": True,
-            }
-        )
+    async def feishu_form_fill_sse_contract() -> dict[str, Any]:
+        return {
+            "run_endpoint": "POST /v1/feishu/form-fill/run",
+            "input_endpoint": "POST /v1/feishu/form-fill/runs/{run_id}/input",
+            "events": [
+                "run_started",
+                "phase_started",
+                "ask_user_question",
+                "user_response_received",
+                "phase_completed",
+                "step_start",
+                "step_end",
+                "run_completed",
+                "run_failed",
+                "run_cancelled",
+                "heartbeat",
+            ],
+            "input_decisions": ["confirm", "edit", "cancel"],
+            "natural_language_examples": {
+                "confirm": ["没问题", "OK", "没错"],
+                "cancel": ["取消", "算了", "别提交"],
+                "edit_or_supplement": ["人数改成 6", "换一个 case：王小明 6月3日 3人"],
+            },
+            "note": "Each endpoint returns one SSE segment. When ask_user_question arrives, render its payload; later POST question_id plus content.text or content.decision to input_endpoint to continue with another SSE segment.",
+        }
 
     return server
 

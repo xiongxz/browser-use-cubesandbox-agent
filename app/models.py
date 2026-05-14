@@ -547,18 +547,16 @@ class RuntimeConfigSnapshot(BaseModel):
     runtime_config: dict[str, Any] = Field(default_factory=dict)
 
 
-class FeishuFormFillPrepareRequest(BaseModel):
+class FeishuFormFillRunRequest(BaseModel):
     query: str = Field(description="Natural-language source text that should be parsed into the form fields.")
+    form_url: str | None = Field(default=None, description="Optional Feishu form URL. Defaults to the built-in preset form.")
+    allowed_domains: list[str] = Field(default_factory=list)
+    headless: bool | None = None
+    max_steps: int = Field(default=60, ge=1, le=120)
+    timeout_sec: int = Field(default=900, ge=30, le=3600)
+    use_vision: Literal["auto", "always", "never"] = Field(default="auto")
     llm: LLMOverride | None = None
-
-
-class FeishuFormFillSubmitRequest(BaseModel):
-    draft_session_id: str = Field(description="The draft_session_id returned by the draft phase.")
-    human_confirmation_notes: str | None = Field(
-        default=None,
-        description="Optional non-data notes for the submit step. If the user provides new data, re-run the prepare phase instead of using this field.",
-    )
-    confirmed_answers: list[FeishuFormAnswerOverride] = Field(default_factory=list)
+    auth: BrowserAuthConfig | None = None
     field_ids: dict[str, str] = Field(
         default_factory=dict,
         description=(
@@ -566,13 +564,32 @@ class FeishuFormFillSubmitRequest(BaseModel):
             "Keys: name, attendance_time, attendance_count. Omit to use the built-in preset form mapping."
         ),
     )
-    allowed_domains: list[str] = Field(default_factory=list)
-    headless: bool | None = None
-    max_steps: int = Field(default=35, ge=1, le=120)
-    timeout_sec: int = Field(default=900, ge=30, le=3600)
-    use_vision: Literal["auto", "always", "never"] = Field(default="auto")
-    llm: LLMOverride | None = None
-    auth: BrowserAuthConfig | None = None
+
+
+class FormFillRunInputRequest(BaseModel):
+    question_id: str
+    action: Literal["accept", "decline", "cancel", "message"] = Field(
+        default="message",
+        description="Optional UI action hint. Omit for natural-language replies; use content.decision for button semantics.",
+    )
+    content: dict[str, Any] = Field(default_factory=dict)
+    reason: str | None = None
+
+
+class FormFillUserIntent(BaseModel):
+    intent: Literal["confirm", "cancel", "edit", "supplement", "unknown"] = Field(
+        description="Semantic intent of the user's response."
+    )
+    confidence: Literal["high", "medium", "low"] = "medium"
+    fields: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Field edits extracted from the response. Keys: name, attendance_time, attendance_count.",
+    )
+    supplement: str | None = Field(
+        default=None,
+        description="Free-form supplementary information that should be appended and reparsed.",
+    )
+    reason: str | None = None
 
 
 BrowserAgentRunRequest.model_rebuild()

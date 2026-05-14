@@ -1,83 +1,50 @@
-# Agent Run 示例
+# Feishu Form Fill SSE 示例
 
-本目录包含调用 `/v1/agent/run` 接口的请求示例。
+当前公开业务接口只保留飞书表单填写的 HTTP SSE 长链：
 
-## 通用模式 (general mode)
+- `POST /v1/feishu/form-fill/run`：创建一次表单填写 run，流到 `ask_user_question` 后结束本段 SSE。
+- `POST /v1/feishu/form-fill/runs/{run_id}/input`：当 SSE 返回 `ask_user_question` 时，回传用户确认、修改、补充或取消，并返回下一段 SSE。
 
-用于自由度较高的浏览器自动化任务，不需要特定的网站或业务流程。
-
-### 请求示例
-
-```bash
-curl -X POST http://127.0.0.1:49999/v1/agent/run \
-  -H "Content-Type: application/json" \
-  -d @examples/general-chat.sample.json
-```
-
-### 请求字段说明
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `query` | string | 必填 | 自然语言指令 |
-| `mode` | string | "general" | 执行模式：`general` 或 `feishu_bitable_to_form` |
-| `start_url` | string | null | 起始 URL（可选） |
-| `allowed_domains` | array | [] | 允许访问的域名白名单 |
-| `max_steps` | int | 35 | 最大执行步数（1-120） |
-| `timeout_sec` | int | 600 | 超时时间（30-3600秒） |
-| `use_vision` | string | "auto" | 视觉模式：`auto`/`always`/`never` |
-
-### 带认证的请求
-
-如果目标网站需要登录，使用 `auth` 字段：
-
-```json
-{
-  "query": "帮我查看 Gmail 收件箱里的未读邮件数量",
-  "mode": "general",
-  "start_url": "https://mail.google.com",
-  "auth": {
-    "profile_id": "my-gmail-session"
-  }
-}
-```
-
-### SSE 流式输出
-
-使用 `/v1/agent/stream` 获取实时进度：
+## 启动
 
 ```bash
-curl -N -X POST http://127.0.0.1:49999/v1/agent/stream \
-  -H "Content-Type: application/json" \
-  -d @examples/general-chat.sample.json
+PORT=50001 ENABLE_MCP=true ./scripts/run_local.sh
 ```
 
-## 飞书模式 (feishu_bitable_to_form)
-
-专用于飞书多维表格转问卷的流程，支持两阶段确认机制。
-
-见 [feishu-run.sample.json](./feishu-run.sample.json) 和 [feishu-run.confirm.sample.json](./feishu-run.confirm.sample.json)。
-
-## 飞书预置问卷填写 (feishu_form_fill)
-
-专用于“服务内置固定飞书问卷 + 一段自然语言描述 -> 解析固定字段 -> 人工确认 -> 正式提交”的两阶段流程。
-
-### Phase 1：生成待确认答案草稿
+## 打开 SSE
 
 ```bash
-curl -X POST http://127.0.0.1:49999/v1/feishu/form-fill/prepare \
+curl -N -sS -X POST http://127.0.0.1:50001/v1/feishu/form-fill/run \
   -H "Content-Type: application/json" \
-  -d @examples/feishu-form-fill.prepare.sample.json
+  -d @examples/feishu-form-fill.run.sample.json
 ```
 
-### Phase 2：带确认后的字段值正式提交
+当事件流返回 `ask_user_question` 后，复制其中的 `run_id` 和 `question_id`，再调用 input 接口。本段 run SSE 到这里会结束。
+
+## 确认提交
 
 ```bash
-curl -X POST http://127.0.0.1:49999/v1/feishu/form-fill/submit \
+curl --no-buffer -sS -X POST http://127.0.0.1:50001/v1/feishu/form-fill/runs/<run_id>/input \
   -H "Content-Type: application/json" \
-  -d @examples/feishu-form-fill.submit.sample.json
+  -d @examples/feishu-form-fill.input.message-confirm.sample.json
 ```
 
-相关 MCP 调用示例见：
+## 修改字段后再次确认
 
-- [examples/mcp/feishu_form_fill_prepare.json](./mcp/feishu_form_fill_prepare.json)
-- [examples/mcp/feishu_form_fill_submit.json](./mcp/feishu_form_fill_submit.json)
+```bash
+curl --no-buffer -sS -X POST http://127.0.0.1:50001/v1/feishu/form-fill/runs/<run_id>/input \
+  -H "Content-Type: application/json" \
+  -d @examples/feishu-form-fill.input.edit.sample.json
+```
+
+服务会再次返回新的 `ask_user_question`，前端继续渲染 `payload` 等用户最终确认。
+
+## 补充自然语言
+
+```bash
+curl --no-buffer -sS -X POST http://127.0.0.1:50001/v1/feishu/form-fill/runs/<run_id>/input \
+  -H "Content-Type: application/json" \
+  -d @examples/feishu-form-fill.input.supplement.sample.json
+```
+
+这会让服务用补充信息重新生成草稿，适合“换一个请假 case”“其实人数改成 8 个”这类场景。

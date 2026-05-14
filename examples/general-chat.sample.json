@@ -1,7 +1,0 @@
-{
-  "query": "帮我在多维表格https://lexmount.feishu.cn/wiki/DrETwmLEmiHUZ9kDkAsctla5nkK?table=tbluEzvfSbNsD6nj&view=vewvt4j0Ap中添加一条新的记录，姓名：222，性别：女，爱好是旅游",
-  "mode": "general",
-  "max_steps": 20,
-  "timeout_sec": 300,
-  "use_vision": "auto"
-}

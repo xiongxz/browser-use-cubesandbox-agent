@@ -31,7 +31,7 @@ COPY pyproject.toml /app/
 # - Writable layer size: 2G
 # - Expose ports:
 #   49983 = envd control plane, required by CubeSandbox
-#   49999 = FastAPI app API (/healthz, /v1/init, /v1/agent/run, /v1/agent/stream)
+#   49999 = FastAPI app API (/healthz, /v1/init, /v1/feishu/form-fill/run)
 #   60000 = MCP streamable HTTP server, enabled by default
 # - Readiness probe: HTTP on port 49983, path /health, startup timeout about 120s
 # - Optional template env: set ENABLE_MCP=false only when MCP should be disabled

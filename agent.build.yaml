@@ -25,5 +25,4 @@ runtime:
 metadata:
   name: browser-use-cubesandbox-agent
   language: python
-  description: "Browser Use based HTTP agent with JSON and SSE APIs, Feishu bitable to questionnaire showcase, and CubeSandbox-compatible envd integration."
-
+  description: "Browser Use based HTTP SSE agent for Feishu form fill with CubeSandbox-compatible envd integration."

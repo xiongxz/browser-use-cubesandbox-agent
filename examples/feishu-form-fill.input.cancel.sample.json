@@ -1,0 +1,7 @@
+{
+  "question_id": "<question_id>",
+  "content": {
+    "decision": "cancel"
+  },
+  "reason": "用户取消提交。"
+}

@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "feishu_form_fill_sse_contract",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

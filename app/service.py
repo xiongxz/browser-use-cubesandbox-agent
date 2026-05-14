@@ -28,12 +28,14 @@ from .models import (
     FeishuFormAnswerOverride,
     FeishuFormFillOutput,
     FeishuBitableToFormOutput,
+    FormFillUserIntent,
     GenericBrowserTaskOutput,
     GatewayReplyField,
     GatewayReplyOption,
     GatewayReplyPayload,
     GatewayReplyQuestion,
     GatewayReplySummaryItem,
+    LLMOverride,
     PRESET_FEISHU_FORM_URL,
     StreamEvent,
 )
@@ -284,6 +286,36 @@ def _looks_like_form_submission_success(*values: str | None) -> bool:
     return any(marker in lowered for marker in success_markers)
 
 
+def _looks_like_guard_submission_success(values: list[str]) -> bool:
+    for value in values:
+        if "Feishu form submit payload guard status:" not in value:
+            continue
+        _, _, raw = value.partition("Feishu form submit payload guard status:")
+        raw = raw.strip()
+        try:
+            status = json.loads(raw)
+        except json.JSONDecodeError:
+            if any(token in raw for token in ('"ok": true', "'ok': True", '"status": 200')):
+                return True
+            continue
+
+        attempts = status.get("submissionAttempts") if isinstance(status, dict) else None
+        if not isinstance(attempts, list):
+            continue
+        for attempt in attempts:
+            if not isinstance(attempt, dict):
+                continue
+            if attempt.get("ok") is True:
+                return True
+            response_status = attempt.get("status")
+            if isinstance(response_status, int) and 200 <= response_status < 300:
+                return True
+            body_excerpt = str(attempt.get("bodyExcerpt") or "").lower().replace(" ", "")
+            if '"code":0' in body_excerpt or '"success":true' in body_excerpt:
+                return True
+    return False
+
+
 def _confirmed_answer_by_key(
     request: BrowserAgentRunRequest,
     field_key: str,
@@ -354,19 +386,33 @@ def _build_feishu_form_fill_tools(
     controller = Controller(output_model=output_model)
     wire_data = _build_feishu_form_submit_wire_data(request)
 
-    @controller.action(
-        "Install the Feishu form submit payload guard. Call once after opening the preset Feishu form and before clicking submit. "
-        "It patches fetch/XMLHttpRequest so the final form submission carries the confirmed field IDs and values."
-    )
-    async def install_feishu_form_submit_payload_guard(browser_session) -> ActionResult:
-        page = await browser_session.must_get_current_page()
-        result = await page.evaluate(
+    async def apply_guard(page) -> dict[str, Any]:
+        return await page.evaluate(
             """(wireData) => {
                 const guardKey = '__browserUseFeishuFormFillPayloadGuard';
-                window[guardKey] = { wireData, installedAt: Date.now() };
+                window[guardKey] = window[guardKey] || {};
+                window[guardKey].wireData = wireData;
+                window[guardKey].installedAt = window[guardKey].installedAt || Date.now();
+                window[guardKey].submissionAttempts = window[guardKey].submissionAttempts || [];
+
+                function recordAttempt(attempt) {
+                    try {
+                        window[guardKey].submissionAttempts.push({
+                            at: Date.now(),
+                            ...attempt,
+                        });
+                    } catch (error) {
+                        console.warn('Feishu form-fill payload guard record failed', error);
+                    }
+                }
 
                 if (window.__browserUseFeishuFormFillPayloadGuardInstalled) {
-                    return { installed: true, alreadyInstalled: true, wireData };
+                    return {
+                        installed: true,
+                        alreadyInstalled: true,
+                        wireData,
+                        submissionAttempts: window[guardKey].submissionAttempts,
+                    };
                 }
                 window.__browserUseFeishuFormFillPayloadGuardInstalled = true;
 
@@ -429,16 +475,19 @@ def _build_feishu_form_fill_tools(
                 window.fetch = async function patchedFetch(input, init) {
                     let nextInput = input;
                     let nextInit = init ? { ...init } : init;
+                    let changed = false;
 
                     try {
                         if (nextInit && nextInit.body) {
                             const patched = patchBody(nextInit.body);
+                            changed = patched.changed;
                             if (patched.changed) nextInit.body = patched.body;
                         } else if (input instanceof Request) {
                             const method = (input.method || 'GET').toUpperCase();
                             if (method !== 'GET' && method !== 'HEAD') {
                                 const text = await input.clone().text();
                                 const patched = patchBody(text);
+                                changed = patched.changed;
                                 if (patched.changed) {
                                     nextInput = new Request(input, { body: patched.body });
                                 }
@@ -448,13 +497,41 @@ def _build_feishu_form_fill_tools(
                         console.warn('Feishu form-fill payload guard fetch patch failed', error);
                     }
 
-                    return originalFetch(nextInput, nextInit);
+                    const response = await originalFetch(nextInput, nextInit);
+                    if (changed) {
+                        let bodyExcerpt = '';
+                        try {
+                            bodyExcerpt = (await response.clone().text()).slice(0, 500);
+                        } catch (error) {
+                            bodyExcerpt = '';
+                        }
+                        recordAttempt({
+                            transport: 'fetch',
+                            url: typeof nextInput === 'string' ? nextInput : (nextInput && nextInput.url) || '',
+                            status: response.status,
+                            ok: response.ok,
+                            bodyExcerpt,
+                        });
+                    }
+                    return response;
                 };
 
                 const originalSend = XMLHttpRequest.prototype.send;
                 XMLHttpRequest.prototype.send = function patchedSend(body) {
                     try {
                         const patched = patchBody(body);
+                        if (patched.changed) {
+                            const xhr = this;
+                            xhr.addEventListener('loadend', function () {
+                                recordAttempt({
+                                    transport: 'xhr',
+                                    url: xhr.responseURL || '',
+                                    status: xhr.status,
+                                    ok: xhr.status >= 200 && xhr.status < 300,
+                                    bodyExcerpt: String(xhr.responseText || '').slice(0, 500),
+                                });
+                            }, { once: true });
+                        }
                         return originalSend.call(this, patched.changed ? patched.body : body);
                     } catch (error) {
                         console.warn('Feishu form-fill payload guard XHR patch failed', error);
@@ -462,13 +539,63 @@ def _build_feishu_form_fill_tools(
                     }
                 };
 
-                return { installed: true, alreadyInstalled: false, wireData };
+                return {
+                    installed: true,
+                    alreadyInstalled: false,
+                    wireData,
+                    submissionAttempts: window[guardKey].submissionAttempts,
+                };
             }""",
             wire_data,
         )
+
+    @controller.action(
+        "Open the configured Feishu form URL and install the submit payload guard. "
+        "Use this before filling fields so the confirmed values are enforced on final submission."
+    )
+    async def open_feishu_form_and_install_submit_payload_guard(browser_session) -> ActionResult:
+        page = await browser_session.must_get_current_page()
+        if request.form_url:
+            await page.goto(request.form_url)
+        result = await apply_guard(page)
+        return ActionResult(
+            extracted_content=f"Opened Feishu form and installed submit payload guard: {result}",
+            long_term_memory="Opened the Feishu form and installed the submit payload guard with confirmed field IDs and values.",
+        )
+
+    @controller.action(
+        "Install the Feishu form submit payload guard. Call once after opening the preset Feishu form and before clicking submit. "
+        "It patches fetch/XMLHttpRequest so the final form submission carries the confirmed field IDs and values."
+    )
+    async def install_feishu_form_submit_payload_guard(browser_session) -> ActionResult:
+        page = await browser_session.must_get_current_page()
+        result = await apply_guard(page)
         return ActionResult(
             extracted_content=f"Installed Feishu form submit payload guard: {result}",
             long_term_memory="Installed Feishu form submit payload guard with confirmed field IDs and values.",
+        )
+
+    @controller.action(
+        "Read the Feishu form submit payload guard status after clicking submit. "
+        "Use this when no visible success page or toast appears; if a guarded submission attempt has ok=true or a 2xx status, treat the form submission as network-verified."
+    )
+    async def get_feishu_form_submit_payload_guard_status(browser_session) -> ActionResult:
+        page = await browser_session.must_get_current_page()
+        result = await page.evaluate(
+            """() => {
+                const status = window.__browserUseFeishuFormFillPayloadGuard || null;
+                if (!status) return { installed: false, submissionAttempts: [] };
+                return {
+                    installed: true,
+                    installedAt: status.installedAt,
+                    wireData: status.wireData,
+                    submissionAttempts: status.submissionAttempts || [],
+                };
+            }"""
+        )
+        return ActionResult(
+            extracted_content=f"Feishu form submit payload guard status: {json.dumps(result, ensure_ascii=False)}",
+            long_term_memory="Read Feishu form submit payload guard status after submit.",
         )
 
     return controller
@@ -507,6 +634,81 @@ async def _extract_form_fill_with_llm(
     return result.completion
 
 
+async def classify_form_fill_user_intent(
+    text: str,
+    *,
+    settings: Settings,
+    llm: LLMOverride | None = None,
+    original_query: str | None = None,
+    current_query: str | None = None,
+    payload: GatewayReplyPayload | None = None,
+) -> FormFillUserIntent:
+    llm_settings = _resolve_llm_settings_from_override(llm, settings)
+    client = ChatOpenAI(
+        base_url=llm_settings["base_url"],
+        api_key=llm_settings["api_key"],
+        model=llm_settings["model"],
+        temperature=0,
+    )
+    payload_context: dict[str, Any] = {}
+    if payload is not None:
+        payload_context = {
+            "kind": payload.kind,
+            "title": payload.title,
+            "text": payload.text,
+            "summary": [item.model_dump(exclude_none=True) for item in payload.summary],
+            "questions": [question.model_dump(exclude_none=True) for question in payload.questions],
+            "fields": [field.model_dump(exclude_none=True) for field in payload.fields],
+        }
+
+    system = SystemMessage(
+        content=(
+            "You classify a user's reply to a form-fill confirmation card. "
+            "Return JSON only, with keys: intent, confidence, fields, supplement, reason.\n"
+            "Possible intents:\n"
+            "- confirm: clear approval to submit, e.g. 没问题, OK, 没错, 对, 可以, 确认, 提交吧.\n"
+            "- cancel: clear rejection or stop, e.g. 取消, 算了, 不用了, 别提交.\n"
+            "- edit: user corrects specific fields. Extract fields using keys: name, attendance_time, attendance_count.\n"
+            "- supplement: user gives a new or broader natural-language case that should be reparsed, e.g. 换一个case..., 其实是....\n"
+            "- unknown: unclear, neutral chat, or off-topic.\n"
+            "Context you will receive:\n"
+            "- original_query: the user's initial task.\n"
+            "- current_query: the accumulated task after previous user supplements.\n"
+            "- confirmation_payload: the exact card currently shown to the user, including summary values and options.\n"
+            "- user_reply: the latest user message.\n"
+            "Rules:\n"
+            "- Interpret user_reply against confirmation_payload.summary and the current question, not as a standalone sentence.\n"
+            "- If the reply contains field corrections that can be mapped to existing summary ids, use intent=edit and put only the changed fields in fields.\n"
+            "- Use field keys from confirmation_payload.summary item ids when available. For this form the stable keys are name, attendance_time, attendance_count.\n"
+            "- If the reply gives a different broader case that should be parsed again, use intent=supplement and put the full useful text in supplement.\n"
+            "- Prefer edit over confirm when a reply both approves and changes a value, e.g. 人数改成6，其他没问题.\n"
+            "- Use confirm only for clear approval with no new data.\n"
+            "- Use cancel only for clear stop/rejection.\n"
+            "- Use unknown for neutral chat, side topics, or ambiguous replies; do not invent field changes.\n"
+            "- Set confidence=low when ambiguous.\n"
+            "Example: {\"intent\":\"confirm\",\"confidence\":\"high\",\"fields\":{},\"supplement\":null,\"reason\":\"clear approval\"}"
+        )
+    )
+    user = UserMessage(
+        content=json.dumps(
+            {
+                "original_query": original_query,
+                "current_query": current_query,
+                "confirmation_payload": payload_context,
+                "user_reply": text,
+            },
+            ensure_ascii=False,
+        )
+    )
+    result = await client.ainvoke([system, user])
+    raw = str(result.completion or "").strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`")
+        if raw.startswith("json"):
+            raw = raw[4:].strip()
+    return FormFillUserIntent.model_validate_json(raw)
+
+
 @dataclass
 class EventCollector:
     run_id: str
@@ -525,8 +727,10 @@ class EventCollector:
             await self.queue.put(stream_event)
 
 
-def _resolve_llm_settings(request: BrowserAgentRunRequest, settings: Settings) -> dict[str, Any]:
-    override = request.llm
+def _resolve_llm_settings_from_override(
+    override: LLMOverride | None,
+    settings: Settings,
+) -> dict[str, Any]:
     base_url = (override.base_url if override and override.base_url else settings.llm_base_url).rstrip("/")
     api_key = override.api_key if override and override.api_key else settings.llm_api_key
     model = override.model if override and override.model else settings.llm_model
@@ -545,6 +749,10 @@ def _resolve_llm_settings(request: BrowserAgentRunRequest, settings: Settings) -
         "model": model,
         "temperature": temperature,
     }
+
+
+def _resolve_llm_settings(request: BrowserAgentRunRequest, settings: Settings) -> dict[str, Any]:
+    return _resolve_llm_settings_from_override(request.llm, settings)
 
 
 def _build_browser(
@@ -606,7 +814,8 @@ def _build_response(
     visited_urls = [url for url in (history.urls() if hasattr(history, "urls") else []) if url]
     screenshots = [path for path in (history.screenshot_paths() if hasattr(history, "screenshot_paths") else []) if path]
     errors = [error for error in (history.errors() if hasattr(history, "errors") else []) if error]
-    history_excerpt = [_truncate(item) or "" for item in (history.extracted_content() or []) if item][-8:]
+    extracted_content = [item for item in (history.extracted_content() or []) if item]
+    history_excerpt = [_truncate(item) or "" for item in extracted_content][-8:]
     current_url = visited_urls[-1] if visited_urls else None
 
     if isinstance(structured, FeishuBitableToFormOutput):
@@ -659,10 +868,16 @@ def _build_response(
             structured.submission_result,
             history.final_result(),
         )
-        success = not is_waiting and (structured.success or visible_submission_success)
+        guard_submission_success = _looks_like_guard_submission_success(
+            extracted_content + [history.final_result() or ""] + structured.notes
+        )
+        success = not is_waiting and (structured.success or visible_submission_success or guard_submission_success)
+        submission_result = structured.submission_result or (
+            "Submitted (network verified)" if guard_submission_success else None
+        )
         final_text = (
             ("Awaiting human confirmation for the drafted form answers." if is_waiting else None)
-            or structured.submission_result
+            or submission_result
             or "; ".join(structured.notes)
             or history.final_result()
         )
@@ -675,7 +890,7 @@ def _build_response(
             form_name=structured.form_name,
             awaiting_human_confirmation=is_waiting,
             draft_answers=structured.draft_answers,
-            submission_result=structured.submission_result,
+            submission_result=submission_result,
             current_url=current_url,
             visited_urls=visited_urls,
             steps=history.number_of_steps(),
@@ -695,7 +910,7 @@ def _build_response(
                     text=final_text or "表单已提交。",
                     summary=[
                         GatewayReplySummaryItem(label="表单链接", value=structured.form_url),
-                        GatewayReplySummaryItem(label="提交结果", value=structured.submission_result),
+                        GatewayReplySummaryItem(label="提交结果", value=submission_result),
                     ],
                 )
             ),
@@ -924,13 +1139,14 @@ async def execute_run(
             if request.mode == "feishu_form_fill" and is_phase_two
             else None
         )
-        initial_actions = (
-            [{"navigate": {"url": request.bitable_url or request.form_url or request.start_url}}]
-            if (request.bitable_url or request.form_url or request.start_url)
-            else None
-        )
-        if controller is not None and initial_actions is not None:
-            initial_actions.append({"install_feishu_form_submit_payload_guard": {}})
+        if controller is not None:
+            initial_actions = [{"open_feishu_form_and_install_submit_payload_guard": {}}]
+        else:
+            initial_actions = (
+                [{"navigate": {"url": request.bitable_url or request.form_url or request.start_url}}]
+                if (request.bitable_url or request.form_url or request.start_url)
+                else None
+            )
 
         agent = Agent(
             task=task,
@@ -1025,16 +1241,21 @@ async def execute_run(
             "run_completed",
             {
                 "success": response.success,
+                "mode": response.mode,
                 "final_text": response.final_text,
                 "form_url": response.form_url,
+                "form_name": response.form_name,
                 "awaiting_human_confirmation": response.awaiting_human_confirmation,
-                "draft_session_id": response.draft_session_id,
-                "draft_session_expires_at": response.draft_session_expires_at,
                 "submission_result": response.submission_result,
                 "current_url": response.current_url,
+                "visited_urls": response.visited_urls,
                 "payload": response.payload.model_dump() if response.payload else None,
                 "steps": response.steps,
                 "duration_sec": response.duration_sec,
+                "screenshots": response.screenshots,
+                "errors": response.errors,
+                "notes": response.notes,
+                "history_excerpt": response.history_excerpt,
             },
         )
         return response
