@@ -124,10 +124,13 @@ def _merge_confirmed_answers(
         if target is None and override.field_label:
             target = merged_by_label.get(override.field_label)
 
+        normalized_values = override.normalized_values
+        if not normalized_values and override.confirmed_value is None and target is not None:
+            normalized_values = target.normalized_values
         updated = override if target is None else target.model_copy(
             update={
                 "confirmed_value": override.confirmed_value if override.confirmed_value is not None else target.confirmed_value,
-                "normalized_values": override.normalized_values or target.normalized_values,
+                "normalized_values": normalized_values,
                 "clear_value": override.clear_value,
                 "field_key": target.field_key or override.field_key,
                 "field_label": target.field_label or override.field_label,

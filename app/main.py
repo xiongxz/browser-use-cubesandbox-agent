@@ -24,6 +24,7 @@ from .models import (
     AuthProfileSummary,
     AuthProfileUpsertRequest,
     BrowserAgentRunRequest,
+    FeishuFormAnswerDraft,
     FeishuFormAnswerOverride,
     FeishuFormFillRunRequest,
     FormFillRunInputRequest,
@@ -202,6 +203,8 @@ def _payload_with_field_updates(
     for item in payload.summary:
         if item.id in updates:
             summary.append(item.model_copy(update={"value": updates[item.id]}))
+        elif item.label in updates:
+            summary.append(item.model_copy(update={"value": updates[item.label]}))
         else:
             summary.append(item)
 
@@ -213,6 +216,30 @@ def _payload_with_field_updates(
     )
 
 
+def _answer_key(answer: FeishuFormAnswerOverride) -> str:
+    return answer.field_key or answer.field_label or str(answer.index)
+
+
+def _canonical_answers_from_drafts(
+    draft_answers: list[FeishuFormAnswerDraft],
+) -> dict[str, FeishuFormAnswerOverride]:
+    canonical: dict[str, FeishuFormAnswerOverride] = {}
+    for answer in draft_answers:
+        normalized_values = [str(value) for value in answer.normalized_values if str(value).strip()]
+        if answer.proposed_value is None and not normalized_values:
+            continue
+        override = FeishuFormAnswerOverride(
+            index=answer.index,
+            field_key=answer.field_key,
+            field_label=answer.field_label,
+            confirmed_value=answer.proposed_value,
+            normalized_values=normalized_values,
+            clear_value=False,
+        )
+        canonical[_answer_key(override)] = override
+    return canonical
+
+
 def _overrides_from_fields(fields: dict[str, Any]) -> list[FeishuFormAnswerOverride]:
     overrides: list[FeishuFormAnswerOverride] = []
     for field_key, value in fields.items():
@@ -221,6 +248,37 @@ def _overrides_from_fields(fields: dict[str, Any]) -> list[FeishuFormAnswerOverr
             continue
         overrides.append(FeishuFormAnswerOverride(field_key=field_key, confirmed_value=str(value)))
     return overrides
+
+
+def _normalize_field_updates(fields: dict[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    time_keys = {"attendance_time", "参会时间"}
+    for key, value in fields.items():
+        if key in time_keys and isinstance(value, str):
+            normalized[key] = value.strip().replace("/", "-")
+        else:
+            normalized[key] = value
+    return normalized
+
+
+def _apply_field_updates_to_canonical(
+    canonical: dict[str, FeishuFormAnswerOverride],
+    fields: dict[str, Any],
+) -> dict[str, FeishuFormAnswerOverride]:
+    updated = dict(canonical)
+    for override in _overrides_from_fields(fields):
+        key = _answer_key(override)
+        existing = updated.get(key)
+        if existing is not None:
+            override = existing.model_copy(
+                update={
+                    "confirmed_value": override.confirmed_value,
+                    "normalized_values": override.normalized_values,
+                    "clear_value": override.clear_value,
+                }
+            )
+        updated[key] = override
+    return updated
 
 
 def _content_decision(request: FormFillRunInputRequest) -> str:
@@ -560,6 +618,7 @@ async def _stream_draft_until_question(
         draft_session_id=prepare_response.draft_session_id,
         draft_session_expires_at=prepare_response.draft_session_expires_at,
         payload=prepare_response.payload,
+        confirmed_by_key=_canonical_answers_from_drafts(prepare_response.draft_answers),
     )
     refreshed = await form_fill_runs.get(run_id)
     assert refreshed is not None
@@ -674,11 +733,9 @@ async def stream_form_fill_run_input(run_id: str, request: FormFillRunInputReque
             return
 
         if intent.intent == "edit" and intent.fields:
-            confirmed_by_key = dict(state.confirmed_by_key)
-            for override in _overrides_from_fields(intent.fields):
-                key = override.field_key or override.field_label or str(override.index)
-                confirmed_by_key[key] = override
-            payload = _payload_with_field_updates(state.payload, intent.fields)
+            normalized_fields = _normalize_field_updates(intent.fields)
+            confirmed_by_key = _apply_field_updates_to_canonical(state.confirmed_by_key, normalized_fields)
+            payload = _payload_with_field_updates(state.payload, normalized_fields)
             await form_fill_runs.update(
                 run_id,
                 confirmed_by_key=confirmed_by_key,

@@ -360,7 +360,7 @@ def parse_form_fill_query(
 
 
 def display_time_to_timestamp_ms(display_value: str) -> int:
-    display_value = display_value.strip()
+    display_value = display_value.strip().replace("/", "-")
     dt_format = "%Y-%m-%d %H:%M" if len(display_value) > 10 else "%Y-%m-%d"
     dt = datetime.strptime(display_value, dt_format).replace(tzinfo=ZoneInfo("Asia/Shanghai"))
     return int(dt.timestamp() * 1000)
